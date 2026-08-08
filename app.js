@@ -764,14 +764,12 @@ app.post("/register", async (req, res) => {
     const detailFontSize = 13;
     const labelColor = "#455a64";
     const valueColor = "#1e293b";
-    const noteColor = "#dc2626"; // red for login hints
 
-    // ---- Registration No with red hint ----
+    // ---- Registration No ----
     doc.fontSize(detailFontSize).font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Registration No:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
-    doc.text(regNo, rightCol, yPos, { continued: true });
-    doc.fillColor(noteColor).fontSize(10).text(" (Login Username)", { continued: false });
+    doc.text(regNo, rightCol, yPos);
     yPos += 30;
 
     // ---- Name ----
@@ -781,12 +779,11 @@ app.post("/register", async (req, res) => {
     doc.text(name, rightCol, yPos);
     yPos += 30;
 
-    // ---- Email with red hint ----
+    // ---- Email ----
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Email:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
-    doc.text(email, rightCol, yPos, { continued: true });
-    doc.fillColor(noteColor).fontSize(10).text(" (Login Password)", { continued: false });
+    doc.text(email, rightCol, yPos);
     yPos += 30;
 
     // ---- Other custom fields ----
@@ -803,11 +800,26 @@ app.post("/register", async (req, res) => {
       }
     }
 
+    // ---- Quiz Date & Time ----
     const startIST = config.startTime.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Quiz Date & Time (IST):", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
     doc.text(startIST, rightCol, yPos);
+    yPos += 30;
+
+    // ---- Login ID (new field, like the others) ----
+    doc.font("Helvetica-Bold").fillColor(labelColor);
+    doc.text("Login ID:", leftCol, yPos);
+    doc.font("Helvetica").fillColor(valueColor);
+    doc.text(regNo, rightCol, yPos);
+    yPos += 30;
+
+    // ---- Password (new field, like the others) ----
+    doc.font("Helvetica-Bold").fillColor(labelColor);
+    doc.text("Password:", leftCol, yPos);
+    doc.font("Helvetica").fillColor(valueColor);
+    doc.text(email, rightCol, yPos);
     yPos += 30;
 
     const noteY = cardY + cardHeight + 20;
@@ -830,7 +842,6 @@ app.post("/register", async (req, res) => {
     const bulletX = 70;
     let rulesYPos = rulesY + 40;
 
-    // Updated rules list (removed total duration, added two new ones)
     const rules = [
       "Please login 5 minutes before the exam starts.",
       "Do not press back or refresh the browser during the quiz.",
@@ -864,7 +875,6 @@ app.post("/register", async (req, res) => {
     res.status(500).json({ success: false, message: "Registration failed" });
   }
 });
-
 app.get("/questions-csv", async (req, res) => {
   try {
     const config = await getExamConfig();
