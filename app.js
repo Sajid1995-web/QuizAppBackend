@@ -203,7 +203,7 @@ async function rebuildCsv(quizName) {
     }).sort({ rank: 1 }).lean();
 
     if (attempts.length === 0) {
-      // Create empty CSV
+      // Create empty CSV (same as before)
       const csvPath = getCsvPath(quizName);
       const writer = createObjectCsvWriter({
         path: csvPath,
@@ -236,6 +236,7 @@ async function rebuildCsv(quizName) {
 
     const allQuestions = await Question.find({ published: true, quizName }).sort({ createdAt: 1 }).lean();
 
+    // Build initial records (without rank)
     const records = attempts.map((a) => {
       const custom = studentMap[a.studentRegNo] || {};
       const name = custom.name || "";
@@ -258,22 +259,51 @@ async function rebuildCsv(quizName) {
         totalMarksObtained: a.totalMarksObtained || 0,
         totalMarks: a.totalMarks || 0,
         totalTimeMinutes: a.totalTimeMinutes || 0,
-        rank: a.disqualified ? -1 : (a.rank || null),
+        rank: a.disqualified ? -1 : null, // we'll compute later
         timeOfSubmission: a.endTime?.toISOString() || "",
         disqualified: a.disqualified ? "YES" : "NO",
+        // keep original object id for sorting tie‑breaker if needed
+        _id: a._id,
+        endTime: a.endTime,
       };
     });
 
-    // Sort by rank (non‑disqualified first)
-    records.sort((a, b) => {
-      if (a.disqualified === "YES" && b.disqualified === "NO") return 1;
-      if (a.disqualified === "NO" && b.disqualified === "YES") return -1;
-      if (a.rank === null && b.rank !== null) return 1;
-      if (a.rank !== null && b.rank === null) return -1;
-      if (a.rank !== null && b.rank !== null) return a.rank - b.rank;
-      return 0;
+    // Separate disqualified and non‑disqualified
+    const disqualifiedRecords = records.filter(r => r.disqualified === "YES");
+    const activeRecords = records.filter(r => r.disqualified === "NO");
+
+    // Sort active by marks desc, time asc, then endTime asc (tie‑breaker)
+    activeRecords.sort((a, b) => {
+      if (b.totalMarksObtained !== a.totalMarksObtained)
+        return b.totalMarksObtained - a.totalMarksObtained;
+      if (a.totalTimeMinutes !== b.totalTimeMinutes)
+        return a.totalTimeMinutes - b.totalTimeMinutes;
+      // Tie‑breaker: earlier submission gets higher rank
+      return (a.endTime?.getTime() || 0) - (b.endTime?.getTime() || 0);
     });
 
+    // Assign ranks (dense ranking: ties get same rank, next rank skips)
+    let currentRank = 1;
+    for (let i = 0; i < activeRecords.length; i++) {
+      const curr = activeRecords[i];
+      if (i > 0) {
+        const prev = activeRecords[i - 1];
+        if (curr.totalMarksObtained === prev.totalMarksObtained &&
+            curr.totalTimeMinutes === prev.totalTimeMinutes) {
+          // same rank
+          curr.rank = prev.rank;
+          continue;
+        }
+      }
+      curr.rank = currentRank;
+      currentRank++;
+    }
+
+    // Disqualified get rank -1 (already set)
+    // Combine: disqualified at the end (sorted by rank -1, but we can just put them last)
+    const finalRecords = [...activeRecords, ...disqualifiedRecords];
+
+    // Write CSV
     const csvPath = getCsvPath(quizName);
     const writer = createObjectCsvWriter({
       path: csvPath,
@@ -292,7 +322,7 @@ async function rebuildCsv(quizName) {
       ],
       append: false,
     });
-    await writer.writeRecords(records);
+    await writer.writeRecords(finalRecords);
     console.log(`✅ Results CSV rebuilt for quiz "${quizName}" -> ${csvPath}`);
   } catch (error) {
     console.error("❌ Error rebuilding CSV:", error);
@@ -425,11 +455,10 @@ async function finalizeRanks() {
     const config = await getExamConfig();
     const quizName = config.quizName || "Trivia Quiz";
 
-    // 1. Disqualify overdue unsubmitted attempts
     const quizEnd = new Date(config.startTime.getTime() + config.durationMinutes * 60000);
     await disqualifyOverdueAttempts(quizName, quizEnd);
 
-    // 2. Re‑fetch all submitted attempts for ranking
+    // Fetch all submitted, non‑disqualified attempts
     const attempts = await QuizAttempt.find({
       submitted: true,
       quizName,
@@ -437,12 +466,16 @@ async function finalizeRanks() {
     }).lean();
 
     if (attempts.length > 0) {
+      // Sort by marks desc, time asc, and then by endTime asc (tie‑breaker)
       const sorted = attempts
         .filter(a => a.totalMarksObtained !== null && a.totalMarksObtained !== undefined)
         .sort((a, b) => {
           if (b.totalMarksObtained !== a.totalMarksObtained)
             return b.totalMarksObtained - a.totalMarksObtained;
-          return a.totalTimeMinutes - b.totalTimeMinutes;
+          if (a.totalTimeMinutes !== b.totalTimeMinutes)
+            return a.totalTimeMinutes - b.totalTimeMinutes;
+          // Tie‑breaker: earlier submission gets higher rank
+          return (a.endTime?.getTime() || 0) - (b.endTime?.getTime() || 0);
         });
 
       let currentRank = 1;
@@ -450,8 +483,10 @@ async function finalizeRanks() {
         const current = sorted[i];
         if (i > 0) {
           const prev = sorted[i - 1];
+          // Only tie if marks, time, AND endTime are identical (very unlikely)
           if (current.totalMarksObtained === prev.totalMarksObtained &&
-              current.totalTimeMinutes === prev.totalTimeMinutes) {
+              current.totalTimeMinutes === prev.totalTimeMinutes &&
+              current.endTime?.getTime() === prev.endTime?.getTime()) {
             await QuizAttempt.updateOne({ _id: current._id }, { $set: { rank: prev.rank } });
             continue;
           }
@@ -467,11 +502,12 @@ async function finalizeRanks() {
       { $set: { rank: -1 } }
     );
 
+    // Rebuild the CSV
     await rebuildCsv(quizName);
     await ExamConfig.updateOne({}, { $set: { ranksFinalised: true } });
     console.log(`✅ Ranks finalised.`);
 
-    // 3. Auto‑archive if not already archived
+    // Auto‑archive if not already archived
     const configAfter = await ExamConfig.findOne();
     if (!configAfter.archived) {
       const archivedCount = await autoArchiveQuiz(quizName);
@@ -479,7 +515,6 @@ async function finalizeRanks() {
         await ExamConfig.updateOne({}, { $set: { archived: true } });
         console.log(`📦 Quiz "${quizName}" auto‑archived with ${archivedCount} attempts.`);
       } else {
-        // No attempts to archive, but mark as archived anyway to avoid repeated checks
         await ExamConfig.updateOne({}, { $set: { archived: true } });
       }
     }
@@ -1154,9 +1189,14 @@ app.post("/finalize-ranks", async (req, res) => {
 
 app.post("/admin/archive-and-clear", async (req, res) => {
   try {
+    // 1. Re‑rank first (this also updates the CSV)
+    await finalizeRanks();
+
+    // 2. Now archive (finalizeRanks already did auto‑archiving, but if you need manual control)
     const config = await getExamConfig();
     const quizName = config.quizName || "Trivia Quiz";
 
+    // Check if any attempts left (finalizeRanks may have archived them already)
     const attempts = await QuizAttempt.find({ submitted: true, quizName }).lean();
     if (attempts.length === 0) {
       return res.status(400).json({ success: false, message: "No attempts to archive." });
@@ -1180,7 +1220,7 @@ app.post("/admin/archive-and-clear", async (req, res) => {
     await QuizAttempt.deleteMany({ quizName });
     console.log(`🗄️ Archived ${attempts.length} attempts for "${quizName}" and cleared.`);
 
-    await ExamConfig.updateOne({}, { $set: { ranksFinalised: false, archived: true } });
+    await ExamConfig.updateOne({}, { $set: { ranksFinalised: true, archived: true } });
     await rebuildCsv(quizName);
     await rebuildRegistrationCsv(quizName);
 
@@ -1193,7 +1233,48 @@ app.post("/admin/archive-and-clear", async (req, res) => {
     res.status(500).json({ success: false, message: "Archive failed." });
   }
 });
+app.post("/admin/re-rank-archived/:quizName", async (req, res) => {
+  try {
+    const { quizName } = req.params;
+    const attempts = await ArchivedQuizAttempt.find({ quizName }).lean();
+    if (attempts.length === 0) {
+      return res.status(404).json({ success: false, message: "No archived attempts." });
+    }
 
+    // Sort by marks desc, time asc, endTime asc (tie‑breaker)
+    const sorted = attempts
+      .filter(a => a.totalMarksObtained !== null && a.totalMarksObtained !== undefined)
+      .sort((a, b) => {
+        if (b.totalMarksObtained !== a.totalMarksObtained)
+          return b.totalMarksObtained - a.totalMarksObtained;
+        if (a.totalTimeMinutes !== b.totalTimeMinutes)
+          return a.totalTimeMinutes - b.totalTimeMinutes;
+        return (a.endTime?.getTime() || 0) - (b.endTime?.getTime() || 0);
+      });
+
+    let rank = 1;
+    for (let i = 0; i < sorted.length; i++) {
+      const current = sorted[i];
+      if (i > 0) {
+        const prev = sorted[i - 1];
+        if (current.totalMarksObtained === prev.totalMarksObtained &&
+            current.totalTimeMinutes === prev.totalTimeMinutes &&
+            current.endTime?.getTime() === prev.endTime?.getTime()) {
+          // same rank
+          await ArchivedQuizAttempt.updateOne({ _id: current._id }, { $set: { rank: prev.rank } });
+          continue;
+        }
+      }
+      await ArchivedQuizAttempt.updateOne({ _id: current._id }, { $set: { rank: rank } });
+      rank++;
+    }
+
+    res.json({ success: true, message: `Re‑ranked ${sorted.length} archived attempts for "${quizName}".` });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 app.delete("/admin/archived-quizzes/:quizName", async (req, res) => {
   try {
     const { quizName } = req.params;
@@ -1343,11 +1424,12 @@ app.get("/admin/archived-quizzes", async (req, res) => {
 app.get("/admin/archived-csv/:quizName", async (req, res) => {
   try {
     const { quizName } = req.params;
-    const attempts = await ArchivedQuizAttempt.find({ quizName }).sort({ rank: 1 }).lean();
+    const attempts = await ArchivedQuizAttempt.find({ quizName }).lean();
     if (!attempts.length) {
       return res.status(404).json({ success: false, message: "No archived attempts for this quiz." });
     }
 
+    // Build records without rank
     const records = attempts.map(a => ({
       regNo: a.studentRegNo,
       name: a.studentName || "",
@@ -1357,10 +1439,45 @@ app.get("/admin/archived-csv/:quizName", async (req, res) => {
       totalMarksObtained: a.totalMarksObtained || 0,
       totalMarks: a.totalMarks || 0,
       totalTimeMinutes: a.totalTimeMinutes || 0,
-      rank: a.rank || 0,
+      rank: null,
       submissionTime: a.endTime ? a.endTime.toISOString() : "",
       disqualified: a.disqualified ? "YES" : "NO",
+      endTime: a.endTime,
     }));
+
+    // Separate disqualified
+    const disqualifiedRecords = records.filter(r => r.disqualified === "YES");
+    const activeRecords = records.filter(r => r.disqualified === "NO");
+
+    // Sort active by marks desc, time asc, endTime asc (tie‑breaker)
+    activeRecords.sort((a, b) => {
+      if (b.totalMarksObtained !== a.totalMarksObtained)
+        return b.totalMarksObtained - a.totalMarksObtained;
+      if (a.totalTimeMinutes !== b.totalTimeMinutes)
+        return a.totalTimeMinutes - b.totalTimeMinutes;
+      return (a.endTime?.getTime() || 0) - (b.endTime?.getTime() || 0);
+    });
+
+    // Assign ranks (dense ranking)
+    let currentRank = 1;
+    for (let i = 0; i < activeRecords.length; i++) {
+      const curr = activeRecords[i];
+      if (i > 0) {
+        const prev = activeRecords[i - 1];
+        if (curr.totalMarksObtained === prev.totalMarksObtained &&
+            curr.totalTimeMinutes === prev.totalTimeMinutes) {
+          curr.rank = prev.rank;
+          continue;
+        }
+      }
+      curr.rank = currentRank;
+      currentRank++;
+    }
+
+    // Disqualified get -1
+    disqualifiedRecords.forEach(r => r.rank = -1);
+
+    const finalRecords = [...activeRecords, ...disqualifiedRecords];
 
     const csvPath = path.join(resultsDir, `archived_results_${quizName.replace(/[^a-zA-Z0-9-_]/g, "_")}.csv`);
     const writer = createObjectCsvWriter({
@@ -1380,7 +1497,7 @@ app.get("/admin/archived-csv/:quizName", async (req, res) => {
       ],
       append: false,
     });
-    await writer.writeRecords(records);
+    await writer.writeRecords(finalRecords);
 
     const downloadName = `archived_results_${quizName.replace(/[^a-zA-Z0-9-_]/g, "_")}.csv`;
     res.download(csvPath, downloadName, (err) => {
@@ -1962,3 +2079,4 @@ app.listen(PORT, () => {
     console.log(`⏰ Quiz start (UTC): ${c.startTime.toISOString()}`)
   );
 });
+
