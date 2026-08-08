@@ -661,11 +661,26 @@ app.post("/register", async (req, res) => {
     if (missing.length)
       return res.status(400).json({ success: false, message: `Required: ${missing.join(", ")}` });
 
-    const existing = await Student.findOne({ "customData.email": email });
-    if (existing) return res.status(409).json({ success: false, message: "Email already registered" });
+    // 1. Get the current active quiz name first
+    const quizName = config.quizName || "Trivia Quiz";
+
+    // 2. Cross-check BOTH the email and the quizName
+    const existing = await Student.findOne({ 
+      "customData.email": email, 
+      "quizName": quizName 
+    });
+
+    // 3. Throw the warning ONLY if both match
+    if (existing) {
+      return res.status(409).json({ 
+        success: false, 
+        message: "This email is already registered for the current quiz." 
+      });
+    }
 
     const regNo = await generateRegNo();
-    const quizName = config.quizName || "Trivia Quiz";
+    
+ 
 
     const student = new Student({ regNo, quizName, customData });
     await student.save();
@@ -896,14 +911,20 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ success: false, message: "Email does not match our records." });
     }
 
-    const existing = await QuizAttempt.findOne({ studentRegNo: regNo, submitted: true });
-    if (existing) {
-      return res.status(403).json({ success: false, message: "You have already submitted the quiz." });
+    // --- ENHANCED SUBMISSION CHECK ---
+    const attempt = await QuizAttempt.findOne({ studentRegNo: regNo });
+    if (attempt && attempt.submitted) {
+      return res.status(403).json({ 
+        success: false, 
+        isQuizSubmitted: true, // Explicit state flag for the frontend
+        message: "You have already submitted the quiz." 
+      });
     }
 
     const config = await getExamConfig();
     res.json({
       success: true,
+      isQuizSubmitted: false, // Explicit state flag for the frontend
       student: { regNo: student.regNo, customData: Object.fromEntries(student.customData || new Map()) },
       examStartTime: config.startTime,
       examDuration: config.durationMinutes,
@@ -928,22 +949,96 @@ app.get("/get-questions", async (req, res) => {
   }
 });
 
+ 
+ 
+app.post("/login", async (req, res) => {
+  try {
+    const { regNo, email } = req.body;
+    if (!regNo || !email) {
+      return res.status(400).json({ success: false, message: "Registration number and email are required." });
+    }
+
+    const student = await Student.findOne({ regNo });
+    if (!student) {
+      return res.status(404).json({ success: false, message: "Invalid registration number." });
+    }
+
+    const storedEmail = student.customData.get('email');
+    if (!storedEmail || storedEmail.toLowerCase() !== email.toLowerCase()) {
+      return res.status(401).json({ success: false, message: "Email does not match our records." });
+    }
+
+    const config = await getExamConfig();
+    const quizName = config.quizName || "Trivia Quiz";
+
+    // 🔒 STRICT CHECK 1: Is it in the ACTIVE attempts table?
+    const activeAttempt = await QuizAttempt.findOne({ studentRegNo: regNo, quizName });
+    if (activeAttempt && activeAttempt.submitted) {
+      return res.status(403).json({ 
+        success: false, 
+        isQuizSubmitted: true, 
+        message: "You have already submitted the quiz." 
+      });
+    }
+
+    // 🔒 STRICT CHECK 2: Is it in the ARCHIVED attempts table? (This seals the loophole)
+    const archivedAttempt = await ArchivedQuizAttempt.findOne({ studentRegNo: regNo, quizName });
+    if (archivedAttempt) {
+      return res.status(403).json({ 
+        success: false, 
+        isQuizSubmitted: true, 
+        message: "You have already completed this quiz. Your results are finalized." 
+      });
+    }
+
+    res.json({
+      success: true,
+      isQuizSubmitted: false,
+      student: { regNo: student.regNo, customData: Object.fromEntries(student.customData || new Map()) },
+      examStartTime: config.startTime,
+      examDuration: config.durationMinutes,
+      positiveMarks: config.positiveMarks,
+      negativeMarks: config.negativeMarks,
+    });
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(500).json({ success: false, message: "Login failed." });
+  }
+});
+
 app.post("/start-quiz", async (req, res) => {
   try {
     const { regNo } = req.body;
     const config = await getExamConfig();
+    const quizName = config.quizName || "Trivia Quiz";
     const now = new Date();
     const quizEnd = new Date(config.startTime.getTime() + config.durationMinutes * 60000);
+    
     if (now < config.startTime || now > quizEnd)
       return res.status(403).json({ success: false, message: "Quiz is not active" });
 
-    let attempt = await QuizAttempt.findOne({ studentRegNo: regNo, submitted: false });
-    if (!attempt) {
+    // 🔒 STRICT CHECK 1: Block if they are in the ARCHIVES
+    const archivedAttempt = await ArchivedQuizAttempt.findOne({ studentRegNo: regNo, quizName });
+    if (archivedAttempt) {
+      return res.status(403).json({ success: false, message: "You have already submitted this quiz." });
+    }
+
+    // 🔒 STRICT CHECK 2: Block if they have a submitted ACTIVE attempt
+    let attempt = await QuizAttempt.findOne({ studentRegNo: regNo, quizName });
+    
+    if (attempt) {
+      if (attempt.submitted) {
+        return res.status(403).json({ success: false, message: "You have already submitted this quiz." });
+      }
+      // If it exists but is NOT submitted, they are just resuming after a crash. Let them pass.
+    } else {
+      // Create NEW attempt ONLY if absolutely no attempt exists anywhere
       const student = await Student.findOne({ regNo });
       if (!student) return res.status(404).json({ success: false, message: "Student not found" });
+      
       attempt = new QuizAttempt({
         studentRegNo: regNo,
-        quizName: config.quizName || "Trivia Quiz",
+        quizName: quizName,
         startTime: now,
         durationMinutes: config.durationMinutes,
         positiveMarks: config.positiveMarks,
@@ -953,13 +1048,13 @@ app.post("/start-quiz", async (req, res) => {
       });
       await attempt.save();
     }
+    
     res.json({ success: true, startTime: attempt.startTime, durationMinutes: attempt.durationMinutes });
   } catch (err) {
     console.error("Start quiz error:", err);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
-
 app.post("/submit-quiz", async (req, res) => {
   try {
     const { regNo, answers, auto } = req.body; // 👈 accept 'auto' flag
