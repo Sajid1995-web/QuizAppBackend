@@ -1102,13 +1102,13 @@ app.post("/submit-quiz", async (req, res) => {
 
     // Determine disqualification based on auto flag
     let disqualified = false;
-    if (auto) {
-      // Auto-submit: disqualify if at or after end time
-      disqualified = now >= studentEnd;
-    } else {
-      // Manual submit: disqualify only if strictly after end time (allows last-second click)
-      disqualified = now > studentEnd;
-    }
+if (auto) {
+  // Auto-submit always means the timer expired → disqualify
+  disqualified = true;
+} else {
+  // Manual submit: disqualify only if strictly after end time
+  disqualified = now > studentEnd;
+}
 
     if (disqualified) {
       attempt.disqualified = true;
