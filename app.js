@@ -783,16 +783,13 @@ app.post("/register", async (req, res) => {
        .lineTo(pageWidth - 80, noteY - 5)
        .stroke();
 
-    doc.fontSize(16)
-       .fillColor("#1a237e")
-       .font("Helvetica-Bold")
-       .text(" Login Credentials", centerX, noteY , { align: "center" });
+
 
     doc.fontSize(13)
    .fillColor("#dc2626") // Red color
    .font("Helvetica")
    .text(
-     "For Login\nYour username is your Registration No\nYour password is your email address.",
+     "For Login\nYour username is your Registration No\nYour password is your Email.",
      centerX - 240,
      noteY + 40,
      { align: "center", width: pageWidth - 120 }
