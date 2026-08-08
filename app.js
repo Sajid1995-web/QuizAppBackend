@@ -789,14 +789,14 @@ app.post("/register", async (req, res) => {
        .text(" Login Credentials", centerX, noteY , { align: "center" });
 
     doc.fontSize(13)
-       .fillColor("#37474f")
-       .font("Helvetica")
-       .text(
-         "Your username is your Registration ID, and your password is your email address.",
-         centerX-240,
-         noteY + 40,
-         { align: "center", width: pageWidth - 120 }
-       );
+   .fillColor("#dc2626") // Red color
+   .font("Helvetica")
+   .text(
+     "For Login\nYour username is your Registration No\nYour password is your email address.",
+     centerX - 240,
+     noteY + 40,
+     { align: "center", width: pageWidth - 120 }
+   );
 
     const rulesY = noteY + 90;
     doc.fontSize(16)
