@@ -160,7 +160,7 @@ async function generateRegNo() {
     { $inc: { seq: 1 } },
     { new: true, upsert: true }
   );
-  return `TRV-${String(counter.seq).padStart(4, '0')}-${version}`;
+  return `NSTAD-${String(counter.seq).padStart(4, '0')}Q-${version}`;
 }
 
 function getCsvPath(quizName) {
