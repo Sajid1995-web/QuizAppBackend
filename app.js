@@ -150,6 +150,7 @@ async function getExamConfig() {
   return config;
 }
 
+
 async function generateRegNo() {
   const config = await getExamConfig();
   const version = config.quizVersion || 1;
@@ -391,7 +392,200 @@ async function rebuildRegistrationCsv(quizName) {
   await writer.writeRecords(records);
   console.log(`📄 Registration CSV rebuilt for "${quizName}" -> ${csvPath}`);
 }
+let watcherInterval = null;
+let watcherRunning = false;
 
+function startRankWatcher() {
+  // ------------------------------------------------------------
+  // Prevent duplicate watcher intervals
+  // ------------------------------------------------------------
+  if (watcherInterval) {
+    clearInterval(watcherInterval);
+    watcherInterval = null;
+  }
+
+  // ------------------------------------------------------------
+  // Run immediately once
+  // Then continue every 30 seconds
+  // ------------------------------------------------------------
+  const checkQuizLifecycle = async () => {
+    // Prevent overlapping watcher executions
+    if (watcherRunning) {
+      console.log(
+        "⏭️ Rank watcher already running, skipping this cycle."
+      );
+      return;
+    }
+
+    watcherRunning = true;
+
+    try {
+      const config = await getExamConfig();
+
+      if (!config) {
+        console.log(
+          "⚠️ No exam configuration found."
+        );
+        return;
+      }
+
+      const quizName =
+        config.quizName || "Trivia Quiz";
+
+      const startTime =
+        new Date(config.startTime).getTime();
+
+      const durationMinutes =
+        Number(config.durationMinutes) || 30;
+
+      const endTime =
+        startTime +
+        durationMinutes * 60 * 1000;
+
+      const now = Date.now();
+
+      // ----------------------------------------------------------
+      // EXAM HAS NOT STARTED
+      // ----------------------------------------------------------
+      if (now < startTime) {
+        return;
+      }
+
+      // ----------------------------------------------------------
+      // EXAM IS CURRENTLY RUNNING
+      // ----------------------------------------------------------
+      if (
+        now >= startTime &&
+        now <= endTime
+      ) {
+        // Do NOT finalize.
+        // Do NOT archive.
+        //
+        // Students must be able to submit normally.
+        return;
+      }
+
+      // ----------------------------------------------------------
+      // EXAM HAS ENDED
+      // ----------------------------------------------------------
+      console.log(
+        `⏰ Exam "${quizName}" has ended.`
+      );
+
+      // ----------------------------------------------------------
+      // STEP 1:
+      // Finalize ranks ONLY if they haven't already been finalized.
+      //
+      // finalizeRanks() no longer archives attempts.
+      // ----------------------------------------------------------
+      let latestConfig =
+        await ExamConfig.findOne();
+
+      if (!latestConfig) {
+        console.log(
+          "⚠️ Exam configuration disappeared."
+        );
+        return;
+      }
+
+      if (!latestConfig.ranksFinalised) {
+        console.log(
+          `⏳ Finalising ranks for "${quizName}"...`
+        );
+
+        await finalizeRanks();
+
+        console.log(
+          `✅ Rank finalisation completed for "${quizName}".`
+        );
+
+        // Reload config because finalizeRanks()
+        // changes ranksFinalised.
+        latestConfig =
+          await ExamConfig.findOne();
+
+        if (!latestConfig) {
+          return;
+        }
+      } else {
+        console.log(
+          `ℹ️ Ranks already finalised for "${quizName}".`
+        );
+      }
+
+      // ----------------------------------------------------------
+      // STEP 2:
+      // ARCHIVE ONLY AFTER RANKS ARE FINALIZED
+      //
+      // This is intentionally separate from finalizeRanks().
+      // ----------------------------------------------------------
+      if (!latestConfig.archived) {
+        console.log(
+          `🗄️ Starting archive for "${quizName}"...`
+        );
+
+        const archivedCount =
+          await autoArchiveQuiz(
+            quizName
+          );
+
+        // --------------------------------------------------------
+        // Mark the quiz archived ONLY after archive operation
+        // successfully completes.
+        // --------------------------------------------------------
+        await ExamConfig.updateOne(
+          {},
+          {
+            $set: {
+              archived: true,
+              ranksFinalised: true,
+            },
+          }
+        );
+
+        console.log(
+          `📦 Quiz "${quizName}" archived successfully with ${archivedCount} attempts.`
+        );
+      } else {
+        console.log(
+          `ℹ️ Quiz "${quizName}" is already archived.`
+        );
+      }
+
+    } catch (err) {
+      console.error(
+        "❌ Rank watcher error:",
+        err
+      );
+
+      // ----------------------------------------------------------
+      // IMPORTANT:
+      // Do NOT mark the quiz archived if anything failed.
+      //
+      // The next watcher cycle will retry.
+      // ----------------------------------------------------------
+    } finally {
+      watcherRunning = false;
+    }
+  };
+
+  // ------------------------------------------------------------
+  // Run immediately
+  // ------------------------------------------------------------
+  checkQuizLifecycle();
+
+  // ------------------------------------------------------------
+  // Check every 30 seconds
+  // ------------------------------------------------------------
+  watcherInterval = setInterval(
+    checkQuizLifecycle,
+    30 * 1000
+  );
+
+  console.log(
+    "👀 Rank/quiz lifecycle watcher started."
+  );
+}
 // ==================== NEW FUNCTIONS ====================
 
 async function disqualifyOverdueAttempts(quizName, quizEndTime) {
@@ -449,109 +643,198 @@ async function autoArchiveQuiz(quizName) {
   return archivedDocs.length;
 }
 
-async function finalizeRanks() {
+ async function finalizeRanks() {
   try {
-    console.log("⏳ Finalising ranks and cleaning up...");
+    console.log("⏳ Finalising ranks...");
+
     const config = await getExamConfig();
     const quizName = config.quizName || "Trivia Quiz";
 
-    const quizEnd = new Date(config.startTime.getTime() + config.durationMinutes * 60000);
-    await disqualifyOverdueAttempts(quizName, quizEnd);
+    const quizEnd = new Date(
+      config.startTime.getTime() +
+      config.durationMinutes * 60000
+    );
 
-    // Fetch all submitted, non‑disqualified attempts
+    // ------------------------------------------------------------
+    // IMPORTANT:
+    // Disqualify students who did not submit before the exam ended.
+    // ------------------------------------------------------------
+    await disqualifyOverdueAttempts(
+      quizName,
+      quizEnd
+    );
+
+    // ------------------------------------------------------------
+    // Fetch all submitted, non-disqualified attempts
+    // ------------------------------------------------------------
     const attempts = await QuizAttempt.find({
       submitted: true,
       quizName,
       disqualified: false,
     }).lean();
 
+    // ------------------------------------------------------------
+    // Calculate ranks
+    // ------------------------------------------------------------
     if (attempts.length > 0) {
-      // Sort by marks desc, time asc, and then by endTime asc (tie‑breaker)
       const sorted = attempts
-        .filter(a => a.totalMarksObtained !== null && a.totalMarksObtained !== undefined)
+        .filter(
+          (a) =>
+            a.totalMarksObtained !== null &&
+            a.totalMarksObtained !== undefined
+        )
         .sort((a, b) => {
-          if (b.totalMarksObtained !== a.totalMarksObtained)
-            return b.totalMarksObtained - a.totalMarksObtained;
-          if (a.totalTimeMinutes !== b.totalTimeMinutes)
-            return a.totalTimeMinutes - b.totalTimeMinutes;
-          // Tie‑breaker: earlier submission gets higher rank
-          return (a.endTime?.getTime() || 0) - (b.endTime?.getTime() || 0);
+          // Higher marks first
+          if (
+            b.totalMarksObtained !==
+            a.totalMarksObtained
+          ) {
+            return (
+              b.totalMarksObtained -
+              a.totalMarksObtained
+            );
+          }
+
+          // Lower completion time first
+          if (
+            a.totalTimeMinutes !==
+            b.totalTimeMinutes
+          ) {
+            return (
+              a.totalTimeMinutes -
+              b.totalTimeMinutes
+            );
+          }
+
+          // Earlier submission first
+          return (
+            (a.endTime?.getTime() || 0) -
+            (b.endTime?.getTime() || 0)
+          );
         });
 
       let currentRank = 1;
-      for (let i = 0; i < sorted.length; i++) {
+
+      for (
+        let i = 0;
+        i < sorted.length;
+        i++
+      ) {
         const current = sorted[i];
+
+        // --------------------------------------------------------
+        // Same marks + same time + same submission time = tie
+        // --------------------------------------------------------
         if (i > 0) {
-          const prev = sorted[i - 1];
-          // Only tie if marks, time, AND endTime are identical (very unlikely)
-          if (current.totalMarksObtained === prev.totalMarksObtained &&
-              current.totalTimeMinutes === prev.totalTimeMinutes &&
-              current.endTime?.getTime() === prev.endTime?.getTime()) {
-            await QuizAttempt.updateOne({ _id: current._id }, { $set: { rank: prev.rank } });
+          const previous = sorted[i - 1];
+
+          const sameMarks =
+            current.totalMarksObtained ===
+            previous.totalMarksObtained;
+
+          const sameTime =
+            current.totalTimeMinutes ===
+            previous.totalTimeMinutes;
+
+          const sameEndTime =
+            current.endTime?.getTime() ===
+            previous.endTime?.getTime();
+
+          if (
+            sameMarks &&
+            sameTime &&
+            sameEndTime
+          ) {
+            await QuizAttempt.updateOne(
+              {
+                _id: current._id,
+              },
+              {
+                $set: {
+                  rank: previous.rank,
+                },
+              }
+            );
+
             continue;
           }
         }
-        await QuizAttempt.updateOne({ _id: current._id }, { $set: { rank: currentRank } });
+
+        await QuizAttempt.updateOne(
+          {
+            _id: current._id,
+          },
+          {
+            $set: {
+              rank: currentRank,
+            },
+          }
+        );
+
         currentRank++;
       }
     }
 
-    // Set rank -1 for disqualified submitted attempts
+    // ------------------------------------------------------------
+    // Disqualified attempts always have rank -1
+    // ------------------------------------------------------------
     await QuizAttempt.updateMany(
-      { submitted: true, disqualified: true, quizName },
-      { $set: { rank: -1 } }
+      {
+        submitted: true,
+        disqualified: true,
+        quizName,
+      },
+      {
+        $set: {
+          rank: -1,
+        },
+      }
     );
 
-    // Rebuild the CSV
+    // ------------------------------------------------------------
+    // Rebuild results CSV
+    // ------------------------------------------------------------
     await rebuildCsv(quizName);
-    await ExamConfig.updateOne({}, { $set: { ranksFinalised: true } });
-    console.log(`✅ Ranks finalised.`);
 
-    // Auto‑archive if not already archived
-    const configAfter = await ExamConfig.findOne();
-    if (!configAfter.archived) {
-      const archivedCount = await autoArchiveQuiz(quizName);
-      if (archivedCount > 0) {
-        await ExamConfig.updateOne({}, { $set: { archived: true } });
-        console.log(`📦 Quiz "${quizName}" auto‑archived with ${archivedCount} attempts.`);
-      } else {
-        await ExamConfig.updateOne({}, { $set: { archived: true } });
+    // ------------------------------------------------------------
+    // Mark ranks as finalized
+    //
+    // IMPORTANT:
+    // DO NOT ARCHIVE HERE.
+    //
+    // finalizeRanks() only calculates/finalizes ranks.
+    // ------------------------------------------------------------
+    await ExamConfig.updateOne(
+      {},
+      {
+        $set: {
+          ranksFinalised: true,
+        },
       }
-    }
+    );
+
+    console.log(
+      `✅ Ranks finalised for "${quizName}".`
+    );
+
+    // ------------------------------------------------------------
+    // IMPORTANT:
+    // There is intentionally NO:
+    //
+    // autoArchiveQuiz()
+    //
+    // here.
+    //
+    // Active QuizAttempt records must remain available until
+    // the quiz lifecycle is actually finished.
+    // ------------------------------------------------------------
 
   } catch (err) {
-    console.error("❌ Finalisation error:", err);
+    console.error(
+      "❌ Finalisation error:",
+      err
+    );
   }
-}
-
-let watcherInterval = null;
-function startRankWatcher() {
-  if (watcherInterval) {
-    clearInterval(watcherInterval);
-    watcherInterval = null;
-  }
-
-  watcherInterval = setInterval(async () => {
-    try {
-      const config = await getExamConfig();
-      const now = Date.now();
-      const startTime = config.startTime.getTime();
-      const endTime = startTime + config.durationMinutes * 60000;
-
-      if (now < startTime && config.ranksFinalised) {
-        await ExamConfig.updateOne({}, { $set: { ranksFinalised: false, archived: false } });
-        return;
-      }
-
-      if (now > endTime) {
-        if (!config.ranksFinalised || !config.archived) {
-          await finalizeRanks();
-        }
-      }
-    } catch (err) {
-      console.error("❌ Watcher error:", err);
-    }
-  }, 30000);
 }
 
 // ============ ROUTES ============
