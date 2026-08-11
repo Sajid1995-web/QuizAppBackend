@@ -949,113 +949,86 @@ app.get("/get-questions", async (req, res) => {
 
 app.post("/login", async (req, res) => {
   try {
-    const { regNo, email } = req.body;
-
-    // ----------------------------------------------------------
-    // 1. Validate input
-    // ----------------------------------------------------------
+    const {
+      regNo,
+      email,
+    } = req.body;
 
     if (!regNo || !email) {
       return res.status(400).json({
         success: false,
-        message: "Registration number and email are required.",
+        message:
+          "Registration number and email are required.",
       });
     }
 
-    const cleanRegNo = String(regNo).trim();
-    const cleanEmail = String(email).trim().toLowerCase();
-
-    // ----------------------------------------------------------
-    // 2. Find student
-    // ----------------------------------------------------------
-
-    const student = await Student.findOne({
-      regNo: cleanRegNo,
-    });
+    const student =
+      await Student.findOne({
+        regNo,
+      });
 
     if (!student) {
       return res.status(404).json({
         success: false,
-        message: "Invalid registration number.",
+        message:
+          "Invalid registration number.",
       });
     }
 
-    // ----------------------------------------------------------
-    // 3. Verify email
-    // ----------------------------------------------------------
-
     const storedEmail =
-      student.customData?.get("email");
+      student.customData?.get(
+        "email"
+      );
 
     if (
       !storedEmail ||
-      String(storedEmail).trim().toLowerCase() !== cleanEmail
+      storedEmail.toLowerCase() !==
+        email.trim().toLowerCase()
     ) {
       return res.status(401).json({
         success: false,
-        message: "Email does not match our records.",
+        message:
+          "Email does not match our records.",
       });
     }
 
-    // ----------------------------------------------------------
-    // 4. Get CURRENT quiz configuration
-    //
-    // IMPORTANT:
-    // The quizName comes from the current ExamConfig.
-    // Therefore an old submission from another quiz does NOT
-    // block the student from this new quiz.
-    // ----------------------------------------------------------
-
-    const config = await getExamConfig();
+    const config =
+      await getExamConfig();
 
     const quizName =
-      config.quizName || "Trivia Quiz";
+      config.quizName ||
+      "Trivia Quiz";
 
-    // ----------------------------------------------------------
-    // 5. CHECK ACTIVE QUIZ ATTEMPT
-    //
-    // IMPORTANT:
-    // We check BOTH student registration number AND quizName.
-    //
-    // DO NOT use:
-    //
-    // QuizAttempt.findOne({ studentRegNo: cleanRegNo })
-    //
-    // because that would block the student because of an
-    // attempt belonging to an older/different quiz.
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
+    // CURRENT QUIZ ATTEMPT
+    // ------------------------------------------------------------
 
-    const activeAttempt = await QuizAttempt.findOne({
-      studentRegNo: cleanRegNo,
-      quizName: quizName,
-    });
+    const existingAttempt =
+      await QuizAttempt.findOne({
+        studentRegNo: regNo,
+        quizName,
+      }).lean();
 
-    if (activeAttempt && activeAttempt.submitted === true) {
+    if (
+      existingAttempt?.submitted
+    ) {
       return res.status(403).json({
         success: false,
         isQuizSubmitted: true,
-        message: "You have already submitted this quiz.",
+        message:
+          "You have already submitted this quiz.",
       });
     }
 
-    // ----------------------------------------------------------
-    // 6. CHECK ARCHIVED QUIZ ATTEMPT
-    //
-    // Archived results must also be checked using the CURRENT
-    // quizName.
-    //
-    // This prevents an archived submission from the SAME quiz
-    // from being bypassed.
-    //
-    // But an archived submission from a DIFFERENT quiz will
-    // NOT block this quiz.
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
+    // ARCHIVED ATTEMPT
+    // ------------------------------------------------------------
 
     const archivedAttempt =
       await ArchivedQuizAttempt.findOne({
-        studentRegNo: cleanRegNo,
-        quizName: quizName,
-      });
+        studentRegNo: regNo,
+        quizName,
+      }).lean();
 
     if (archivedAttempt) {
       return res.status(403).json({
@@ -1066,180 +1039,547 @@ app.post("/login", async (req, res) => {
       });
     }
 
-    // ----------------------------------------------------------
-    // 7. LOGIN SUCCESS
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
+    // LOGIN SUCCESS
+    // ------------------------------------------------------------
 
     return res.json({
       success: true,
       isQuizSubmitted: false,
 
       student: {
-        regNo: student.regNo,
-        customData: Object.fromEntries(
-          student.customData || new Map()
-        ),
+        regNo:
+          student.regNo,
+
+        customData:
+          Object.fromEntries(
+            student.customData ||
+              new Map()
+          ),
       },
 
-      // Current quiz information
-      quizName: quizName,
-      examStartTime: config.startTime,
-      examDuration: config.durationMinutes,
+      examStartTime:
+        config.startTime,
 
-      positiveMarks: config.positiveMarks,
-      negativeMarks: config.negativeMarks,
+      examDuration:
+        config.durationMinutes,
+
+      positiveMarks:
+        config.positiveMarks,
+
+      negativeMarks:
+        config.negativeMarks,
     });
-
   } catch (err) {
-    console.error("Login error:", err);
+    console.error(
+      "Login error:",
+      err
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Login failed.",
+      message:
+        "Login failed.",
     });
   }
 });
- 
-
-app.post("/start-quiz", async (req, res) => {
+ app.post("/start-quiz", async (req, res) => {
   try {
     const { regNo } = req.body;
+
+    if (!regNo) {
+      return res.status(400).json({
+        success: false,
+        message: "Registration number is required.",
+      });
+    }
+
     const config = await getExamConfig();
     const quizName = config.quizName || "Trivia Quiz";
+
     const now = new Date();
-    const quizEnd = new Date(config.startTime.getTime() + config.durationMinutes * 60000);
-    
-    if (now < config.startTime || now > quizEnd)
-      return res.status(403).json({ success: false, message: "Quiz is not active" });
 
-    // 🔒 STRICT CHECK 1: Block if they are in the ARCHIVES
-    const archivedAttempt = await ArchivedQuizAttempt.findOne({ studentRegNo: regNo, quizName });
-    if (archivedAttempt) {
-      return res.status(403).json({ success: false, message: "You have already submitted this quiz." });
-    }
+    const quizEnd = new Date(
+      config.startTime.getTime() +
+        config.durationMinutes * 60000
+    );
 
-    // 🔒 STRICT CHECK 2: Block if they have a submitted ACTIVE attempt
-    let attempt = await QuizAttempt.findOne({ studentRegNo: regNo, quizName });
-    
-    if (attempt) {
-      if (attempt.submitted) {
-        return res.status(403).json({ success: false, message: "You have already submitted this quiz." });
-      }
-      // If it exists but is NOT submitted, they are just resuming after a crash. Let them pass.
-    } else {
-      // Create NEW attempt ONLY if absolutely no attempt exists anywhere
-      const student = await Student.findOne({ regNo });
-      if (!student) return res.status(404).json({ success: false, message: "Student not found" });
-      
-      attempt = new QuizAttempt({
-        studentRegNo: regNo,
-        quizName: quizName,
-        startTime: now,
-        durationMinutes: config.durationMinutes,
-        positiveMarks: config.positiveMarks,
-        negativeMarks: config.negativeMarks,
-        answers: [],
-        submitted: false,
+    // Quiz must currently be open.
+    if (
+      now < config.startTime ||
+      now > quizEnd
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Quiz is not active.",
       });
-      await attempt.save();
-    }
-    
-    res.json({ success: true, startTime: attempt.startTime, durationMinutes: attempt.durationMinutes });
-  } catch (err) {
-    console.error("Start quiz error:", err);
-    res.status(500).json({ success: false, message: "Server error" });
-  }
-});
-app.post("/submit-quiz", async (req, res) => {
-  try {
-    const { regNo, answers, auto } = req.body; // 👈 accept 'auto' flag
-    if (!regNo || !answers) return res.status(400).json({ success: false, message: "Missing data" });
-
-    const now = new Date();
-    const config = await getExamConfig();
-    const attempt = await QuizAttempt.findOne({ studentRegNo: regNo, submitted: false });
-    if (!attempt) return res.status(404).json({ success: false, message: "No active quiz session" });
-
-    const studentEnd = new Date(attempt.startTime.getTime() + attempt.durationMinutes * 60000);
-
-    // Determine disqualification based on auto flag
-    let disqualified = false;
-if (auto) {
-  // Auto-submit always means the timer expired → disqualify
-  disqualified = true;
-} else {
-  // Manual submit: disqualify only if strictly after end time
-  disqualified = now > studentEnd;
-}
-
-    if (disqualified) {
-      attempt.disqualified = true;
-      attempt.score = -1;
-      attempt.totalMarksObtained = -1;
-      attempt.totalTimeMinutes = Math.round(((now - attempt.startTime) / 60000) * 100) / 100;
-      attempt.submitted = true;
-      attempt.endTime = now;
-      attempt.answers = answers;
-      attempt.rank = -1;
-      await attempt.save();
-      await ExamConfig.updateOne({}, { $set: { ranksFinalised: false, archived: false } });
-      await rebuildCsv(config.quizName || "Trivia Quiz");
-      await finalizeRanks();
-      return res.json({ success: true, disqualified: true, message: "Time expired. You are disqualified." });
     }
 
-    // ---------- Normal scoring (unchanged from your original) ----------
-    const questions = await Question.find({ published: true, quizName: config.quizName }).sort({ createdAt: 1 });
-    const totalQ = questions.length;
-    while (answers.length < totalQ) answers.push(null);
+    // ------------------------------------------------------------
+    // BLOCK PREVIOUSLY ARCHIVED SUBMISSION
+    // ------------------------------------------------------------
 
-    let correct = 0, wrong = 0;
-    answers.forEach((ans, idx) => {
-      if (idx < questions.length) {
-        if (ans === questions[idx].correctAnswer) correct++;
-        else if (ans !== null) wrong++;
+    const archivedAttempt =
+      await ArchivedQuizAttempt.findOne({
+        studentRegNo: regNo,
+        quizName,
+      }).lean();
+
+    if (archivedAttempt) {
+      return res.status(403).json({
+        success: false,
+        isQuizSubmitted: true,
+        message:
+          "You have already submitted this quiz.",
+      });
+    }
+
+    // ------------------------------------------------------------
+    // CHECK EXISTING ACTIVE ATTEMPT
+    // ------------------------------------------------------------
+
+    let attempt =
+      await QuizAttempt.findOne({
+        studentRegNo: regNo,
+        quizName,
+      });
+
+    if (attempt) {
+      // Already submitted -> NEVER allow another attempt.
+      if (attempt.submitted) {
+        return res.status(403).json({
+          success: false,
+          isQuizSubmitted: true,
+          message:
+            "You have already submitted this quiz.",
+        });
       }
+
+      // Existing unsubmitted attempt:
+      // resume it. DO NOT reset its start time.
+      return res.json({
+        success: true,
+        resumed: true,
+        startTime: attempt.startTime,
+        durationMinutes:
+          attempt.durationMinutes,
+        positiveMarks:
+          attempt.positiveMarks,
+        negativeMarks:
+          attempt.negativeMarks,
+      });
+    }
+
+    // ------------------------------------------------------------
+    // VERIFY STUDENT
+    // ------------------------------------------------------------
+
+    const student =
+      await Student.findOne({ regNo });
+
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: "Student not found.",
+      });
+    }
+
+    // ------------------------------------------------------------
+    // CREATE FIRST ATTEMPT
+    // ------------------------------------------------------------
+
+    attempt = new QuizAttempt({
+      studentRegNo: regNo,
+      quizName,
+      startTime: now,
+      durationMinutes:
+        config.durationMinutes,
+      positiveMarks:
+        config.positiveMarks,
+      negativeMarks:
+        config.negativeMarks,
+      answers: [],
+      submitted: false,
+      disqualified: false,
     });
 
-    const posMarks = attempt.positiveMarks;
-    const negMarks = attempt.negativeMarks;
-    const maxMarks = totalQ * posMarks;
-    let netMarks = correct * posMarks - wrong * negMarks;
-    netMarks = Math.round(netMarks * 100) / 100;
-
-    const totalTimeMinutes = Math.round(((now - attempt.startTime) / 60000) * 100) / 100;
-
-    attempt.endTime = now;
-    attempt.totalTimeMinutes = totalTimeMinutes;
-    attempt.answers = answers;
-    attempt.score = correct;
-    attempt.totalMarksObtained = netMarks;
-    attempt.totalMarks = maxMarks;
-    attempt.submitted = true;
-    attempt.rank = null;
     await attempt.save();
 
-    await ExamConfig.updateOne({}, { $set: { ranksFinalised: false, archived: false } });
-    await rebuildCsv(config.quizName || "Trivia Quiz");
+    return res.json({
+      success: true,
+      resumed: false,
+      startTime: attempt.startTime,
+      durationMinutes:
+        attempt.durationMinutes,
+      positiveMarks:
+        attempt.positiveMarks,
+      negativeMarks:
+        attempt.negativeMarks,
+    });
+  } catch (err) {
+    console.error(
+      "Start quiz error:",
+      err
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Could not start the quiz.",
+    });
+  }
+});
+ app.post("/submit-quiz", async (req, res) => {
+  try {
+    const {
+      regNo,
+      answers,
+      auto,
+    } = req.body;
+
+    // ------------------------------------------------------------
+    // VALIDATION
+    // ------------------------------------------------------------
+
+    if (!regNo) {
+      return res.status(400).json({
+        success: false,
+        message: "Registration number is required.",
+      });
+    }
+
+    if (!Array.isArray(answers)) {
+      return res.status(400).json({
+        success: false,
+        message: "Answers must be an array.",
+      });
+    }
+
+    const config = await getExamConfig();
+    const quizName =
+      config.quizName || "Trivia Quiz";
+
+    const now = new Date();
+
+    // ------------------------------------------------------------
+    // FIND CURRENT ATTEMPT
+    //
+    // IMPORTANT:
+    // Do NOT trust the frontend `auto` flag for timing.
+    // Server time decides whether the attempt expired.
+    // ------------------------------------------------------------
+
+    const attempt =
+      await QuizAttempt.findOne({
+        studentRegNo: regNo,
+        quizName,
+      });
+
+    if (!attempt) {
+      return res.status(404).json({
+        success: false,
+        message:
+          "No quiz attempt found.",
+      });
+    }
+
+    // ------------------------------------------------------------
+    // ALREADY SUBMITTED
+    // ------------------------------------------------------------
+
+    if (attempt.submitted) {
+      return res.status(409).json({
+        success: false,
+        alreadySubmitted: true,
+        message:
+          "This quiz has already been submitted.",
+      });
+    }
+
+    // ------------------------------------------------------------
+    // SERVER-AUTHORITATIVE END TIME
+    // ------------------------------------------------------------
+
+    const studentEnd = new Date(
+      attempt.startTime.getTime() +
+        attempt.durationMinutes * 60000
+    );
+
+    const expired =
+      now >= studentEnd;
+
+    // `auto` is informational only.
+    // Server time determines expiry.
+    const disqualified = expired;
+
+    // ------------------------------------------------------------
+    // DISQUALIFIED / EXPIRED
+    // ------------------------------------------------------------
+
+    if (disqualified) {
+      const totalTimeMinutes =
+        Math.round(
+          ((now.getTime() -
+            attempt.startTime.getTime()) /
+            60000) *
+            100
+        ) / 100;
+
+      /*
+       * IMPORTANT:
+       *
+       * Only update if submitted is STILL false.
+       *
+       * This makes the operation race-safe.
+       *
+       * If another request submitted first,
+       * modifiedCount will be 0.
+       */
+
+      const updateResult =
+        await QuizAttempt.updateOne(
+          {
+            _id: attempt._id,
+            submitted: false,
+          },
+          {
+            $set: {
+              disqualified: true,
+              score: -1,
+              totalMarksObtained: -1,
+              totalTimeMinutes,
+              submitted: true,
+              endTime: now,
+              answers,
+              rank: -1,
+            },
+          }
+        );
+
+      // Another submission won the race.
+      if (updateResult.modifiedCount !== 1) {
+        return res.status(409).json({
+          success: false,
+          alreadySubmitted: true,
+          message:
+            "This quiz has already been submitted.",
+        });
+      }
+
+      // Rebuild only after the database update succeeded.
+      await ExamConfig.updateOne(
+        {},
+        {
+          $set: {
+            ranksFinalised: false,
+            archived: false,
+          },
+        }
+      );
+
+      await rebuildCsv(
+        quizName
+      );
+
+      await finalizeRanks();
+
+      return res.json({
+        success: true,
+        disqualified: true,
+        score: -1,
+        totalMarksObtained: -1,
+        message:
+          "Time expired. You are disqualified.",
+      });
+    }
+
+    // ============================================================
+    // NORMAL SCORING
+    // ============================================================
+
+    const questions =
+      await Question.find({
+        published: true,
+        quizName,
+      }).sort({
+        createdAt: 1,
+      });
+
+    const totalQ =
+      questions.length;
+
+    // Do not mutate req.body.answers directly.
+    const normalizedAnswers = [
+      ...answers,
+    ];
+
+    while (
+      normalizedAnswers.length <
+      totalQ
+    ) {
+      normalizedAnswers.push(null);
+    }
+
+    // Ignore any extra answers beyond actual questions.
+    normalizedAnswers.length =
+      totalQ;
+
+    let correct = 0;
+    let wrong = 0;
+
+    normalizedAnswers.forEach(
+      (ans, idx) => {
+        if (idx >= questions.length) {
+          return;
+        }
+
+        if (
+          ans ===
+          questions[idx].correctAnswer
+        ) {
+          correct++;
+        } else if (
+          ans !== null &&
+          ans !== undefined &&
+          ans !== ""
+        ) {
+          wrong++;
+        }
+      }
+    );
+
+    const posMarks =
+      Number(
+        attempt.positiveMarks || 0
+      );
+
+    const negMarks =
+      Number(
+        attempt.negativeMarks || 0
+      );
+
+    const maxMarks =
+      totalQ * posMarks;
+
+    let netMarks =
+      correct * posMarks -
+      wrong * negMarks;
+
+    netMarks =
+      Math.round(
+        netMarks * 100
+      ) / 100;
+
+    const totalTimeMinutes =
+      Math.round(
+        ((now.getTime() -
+          attempt.startTime.getTime()) /
+          60000) *
+          100
+      ) / 100;
+
+    // ------------------------------------------------------------
+    // ATOMIC SUBMISSION
+    // ------------------------------------------------------------
+
+    /*
+     * We calculate everything first.
+     *
+     * Then the actual submission is committed only if:
+     *
+     *   submitted === false
+     *
+     * If two requests arrive at the same time,
+     * only ONE can change submitted:false -> true.
+     */
+
+    const updateResult =
+      await QuizAttempt.updateOne(
+        {
+          _id: attempt._id,
+          submitted: false,
+        },
+        {
+          $set: {
+            endTime: now,
+            totalTimeMinutes,
+            answers:
+              normalizedAnswers,
+            score: correct,
+            totalMarksObtained:
+              netMarks,
+            totalMarks:
+              maxMarks,
+            submitted: true,
+            disqualified: false,
+            rank: null,
+          },
+        }
+      );
+
+    // ------------------------------------------------------------
+    // RACE LOST
+    // ------------------------------------------------------------
+
+    if (
+      updateResult.modifiedCount !== 1
+    ) {
+      return res.status(409).json({
+        success: false,
+        alreadySubmitted: true,
+        message:
+          "This quiz has already been submitted.",
+      });
+    }
+
+    // ------------------------------------------------------------
+    // FINALIZE AFTER SUCCESSFUL COMMIT
+    // ------------------------------------------------------------
+
+    await ExamConfig.updateOne(
+      {},
+      {
+        $set: {
+          ranksFinalised: false,
+          archived: false,
+        },
+      }
+    );
+
+    await rebuildCsv(
+      quizName
+    );
+
     await finalizeRanks();
 
-    res.json({
+    // ------------------------------------------------------------
+    // RESPONSE
+    // ------------------------------------------------------------
+
+    return res.json({
       success: true,
       score: correct,
       correctCount: correct,
       wrongCount: wrong,
-      totalMarksObtained: netMarks,
+      totalMarksObtained:
+        netMarks,
       totalMarks: maxMarks,
       totalQuestions: totalQ,
       totalTimeMinutes,
       disqualified: false,
     });
   } catch (err) {
-    console.error("Submit error:", err);
-    res.status(500).json({ success: false, message: "Submission failed" });
+    console.error(
+      "Submit error:",
+      err
+    );
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Submission failed. Please try again.",
+    });
   }
 });
-
 app.post("/finalize-ranks", async (req, res) => {
   try {
     await finalizeRanks();
@@ -2037,25 +2377,66 @@ app.get("/servertime", async (req, res) => {
 
 app.get("/quiz-status", async (req, res) => {
   try {
-    const config = await getExamConfig();
+    const config =
+      await getExamConfig();
+
     const now = new Date();
-    const quizEnd = new Date(config.startTime.getTime() + config.durationMinutes * 60000);
-    const isOpen = now >= config.startTime && now <= quizEnd;
-    const hasEnded = now > quizEnd;
-    res.json({
+
+    const quizEnd =
+      new Date(
+        config.startTime.getTime() +
+          config.durationMinutes *
+            60000
+      );
+
+    const isOpen =
+      now >= config.startTime &&
+      now < quizEnd;
+
+    const hasEnded =
+      now >= quizEnd;
+
+    return res.json({
+      success: true,
+
+      // Server timestamp.
+      serverNow: now,
+
       isQuizOpen: isOpen,
-      hasEnded: hasEnded,
-      startTime: config.startTime,
-      endTime: quizEnd,
-      durationMinutes: config.durationMinutes,
-      ranksFinalised: config.ranksFinalised,
-      archived: config.archived || false,
+      hasEnded,
+
+      startTime:
+        config.startTime,
+
+      endTime:
+        quizEnd,
+
+      durationMinutes:
+        config.durationMinutes,
+
+      quizName:
+        config.quizName ||
+        "Trivia Quiz",
+
+      ranksFinalised:
+        config.ranksFinalised,
+
+      archived:
+        config.archived || false,
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: "Server error" });
+    console.error(
+      "Quiz status error:",
+      err
+    );
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Could not get quiz status.",
+    });
   }
 });
-
 // ============ CRUD ROUTES FOR QUESTIONS ============
 app.get("/questions", async (req, res) => {
   try {
