@@ -927,49 +927,7 @@ app.get("/questions-csv", async (req, res) => {
   }
 });
 
-app.post("/login", async (req, res) => {
-  try {
-    const { regNo, email } = req.body;
-    if (!regNo || !email) {
-      return res.status(400).json({ success: false, message: "Registration number and email are required." });
-    }
-
-    const student = await Student.findOne({ regNo });
-    if (!student) {
-      return res.status(404).json({ success: false, message: "Invalid registration number." });
-    }
-
-    const storedEmail = student.customData.get('email');
-    if (!storedEmail || storedEmail.toLowerCase() !== email.toLowerCase()) {
-      return res.status(401).json({ success: false, message: "Email does not match our records." });
-    }
-
-    // --- ENHANCED SUBMISSION CHECK ---
-    const attempt = await QuizAttempt.findOne({ studentRegNo: regNo });
-    if (attempt && attempt.submitted) {
-      return res.status(403).json({ 
-        success: false, 
-        isQuizSubmitted: true, // Explicit state flag for the frontend
-        message: "You have already submitted the quiz." 
-      });
-    }
-
-    const config = await getExamConfig();
-    res.json({
-      success: true,
-      isQuizSubmitted: false, // Explicit state flag for the frontend
-      student: { regNo: student.regNo, customData: Object.fromEntries(student.customData || new Map()) },
-      examStartTime: config.startTime,
-      examDuration: config.durationMinutes,
-      positiveMarks: config.positiveMarks,
-      negativeMarks: config.negativeMarks,
-    });
-  } catch (err) {
-    console.error("Login error:", err);
-    res.status(500).json({ success: false, message: "Login failed." });
-  }
-});
-
+ 
 app.get("/get-questions", async (req, res) => {
   try {
     const config = await getExamConfig();
@@ -984,60 +942,164 @@ app.get("/get-questions", async (req, res) => {
 
  
  
+ 
+// ============================================================
+// QUIZ-SPECIFIC LOGIN
+// ============================================================
+
 app.post("/login", async (req, res) => {
   try {
     const { regNo, email } = req.body;
+
+    // ----------------------------------------------------------
+    // 1. Validate input
+    // ----------------------------------------------------------
+
     if (!regNo || !email) {
-      return res.status(400).json({ success: false, message: "Registration number and email are required." });
+      return res.status(400).json({
+        success: false,
+        message: "Registration number and email are required.",
+      });
     }
 
-    const student = await Student.findOne({ regNo });
+    const cleanRegNo = String(regNo).trim();
+    const cleanEmail = String(email).trim().toLowerCase();
+
+    // ----------------------------------------------------------
+    // 2. Find student
+    // ----------------------------------------------------------
+
+    const student = await Student.findOne({
+      regNo: cleanRegNo,
+    });
+
     if (!student) {
-      return res.status(404).json({ success: false, message: "Invalid registration number." });
+      return res.status(404).json({
+        success: false,
+        message: "Invalid registration number.",
+      });
     }
 
-    const storedEmail = student.customData.get('email');
-    if (!storedEmail || storedEmail.toLowerCase() !== email.toLowerCase()) {
-      return res.status(401).json({ success: false, message: "Email does not match our records." });
+    // ----------------------------------------------------------
+    // 3. Verify email
+    // ----------------------------------------------------------
+
+    const storedEmail =
+      student.customData?.get("email");
+
+    if (
+      !storedEmail ||
+      String(storedEmail).trim().toLowerCase() !== cleanEmail
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Email does not match our records.",
+      });
     }
+
+    // ----------------------------------------------------------
+    // 4. Get CURRENT quiz configuration
+    //
+    // IMPORTANT:
+    // The quizName comes from the current ExamConfig.
+    // Therefore an old submission from another quiz does NOT
+    // block the student from this new quiz.
+    // ----------------------------------------------------------
 
     const config = await getExamConfig();
-    const quizName = config.quizName || "Trivia Quiz";
 
-    // 🔒 STRICT CHECK 1: Is it in the ACTIVE attempts table?
-    const activeAttempt = await QuizAttempt.findOne({ studentRegNo: regNo, quizName });
-    if (activeAttempt && activeAttempt.submitted) {
-      return res.status(403).json({ 
-        success: false, 
-        isQuizSubmitted: true, 
-        message: "You have already submitted the quiz." 
+    const quizName =
+      config.quizName || "Trivia Quiz";
+
+    // ----------------------------------------------------------
+    // 5. CHECK ACTIVE QUIZ ATTEMPT
+    //
+    // IMPORTANT:
+    // We check BOTH student registration number AND quizName.
+    //
+    // DO NOT use:
+    //
+    // QuizAttempt.findOne({ studentRegNo: cleanRegNo })
+    //
+    // because that would block the student because of an
+    // attempt belonging to an older/different quiz.
+    // ----------------------------------------------------------
+
+    const activeAttempt = await QuizAttempt.findOne({
+      studentRegNo: cleanRegNo,
+      quizName: quizName,
+    });
+
+    if (activeAttempt && activeAttempt.submitted === true) {
+      return res.status(403).json({
+        success: false,
+        isQuizSubmitted: true,
+        message: "You have already submitted this quiz.",
       });
     }
 
-    // 🔒 STRICT CHECK 2: Is it in the ARCHIVED attempts table? (This seals the loophole)
-    const archivedAttempt = await ArchivedQuizAttempt.findOne({ studentRegNo: regNo, quizName });
+    // ----------------------------------------------------------
+    // 6. CHECK ARCHIVED QUIZ ATTEMPT
+    //
+    // Archived results must also be checked using the CURRENT
+    // quizName.
+    //
+    // This prevents an archived submission from the SAME quiz
+    // from being bypassed.
+    //
+    // But an archived submission from a DIFFERENT quiz will
+    // NOT block this quiz.
+    // ----------------------------------------------------------
+
+    const archivedAttempt =
+      await ArchivedQuizAttempt.findOne({
+        studentRegNo: cleanRegNo,
+        quizName: quizName,
+      });
+
     if (archivedAttempt) {
-      return res.status(403).json({ 
-        success: false, 
-        isQuizSubmitted: true, 
-        message: "You have already completed this quiz. Your results are finalized." 
+      return res.status(403).json({
+        success: false,
+        isQuizSubmitted: true,
+        message:
+          "You have already completed this quiz. Your results are finalized.",
       });
     }
 
-    res.json({
+    // ----------------------------------------------------------
+    // 7. LOGIN SUCCESS
+    // ----------------------------------------------------------
+
+    return res.json({
       success: true,
       isQuizSubmitted: false,
-      student: { regNo: student.regNo, customData: Object.fromEntries(student.customData || new Map()) },
+
+      student: {
+        regNo: student.regNo,
+        customData: Object.fromEntries(
+          student.customData || new Map()
+        ),
+      },
+
+      // Current quiz information
+      quizName: quizName,
       examStartTime: config.startTime,
       examDuration: config.durationMinutes,
+
       positiveMarks: config.positiveMarks,
       negativeMarks: config.negativeMarks,
     });
+
   } catch (err) {
     console.error("Login error:", err);
-    res.status(500).json({ success: false, message: "Login failed." });
+
+    return res.status(500).json({
+      success: false,
+      message: "Login failed.",
+    });
   }
 });
+ 
 
 app.post("/start-quiz", async (req, res) => {
   try {
