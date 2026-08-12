@@ -1,4 +1,4 @@
-require("dotenv").config();
+ require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -37,6 +37,46 @@ mongoose
   .catch((err) => console.error("❌ MongoDB connection error:", err));
 
 // ============ MODELS ============
+const ArchivedQuizRegistrationSchema = new mongoose.Schema(
+  {
+    regNo: {
+      type: String,
+      required: true,
+      index: true,
+    },
+
+    quizName: {
+      type: String,
+      required: true,
+      index: true,
+    },
+
+    registeredAt: {
+      type: Date,
+      default: Date.now,
+    },
+
+    customData: {
+      type: Map,
+      of: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
+
+    archivedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  {
+    collection: "archivedquizregistrations",
+  }
+);
+
+const ArchivedQuizRegistration =
+  mongoose.model(
+    "ArchivedQuizRegistration",
+    ArchivedQuizRegistrationSchema
+  );
 
 const questionSchema = new mongoose.Schema({
   question: { type: String, required: true, trim: true },
@@ -118,6 +158,7 @@ const examConfigSchema = new mongoose.Schema({
     default: () => new Map(),
   },
   ranksFinalised: { type: Boolean, default: false },
+    registrationOpen: { type: Boolean, default: true },
   updatedAt: { type: Date, default: Date.now },
   quizVersion: { type: Number, default: 1 },
   archived: { type: Boolean, default: false }, // NEW: flag to avoid re-archiving
@@ -853,6 +894,8 @@ app.get("/admin/config", async (req, res) => {
         quizName: config.quizName || "Trivia Quiz",
         quizVersion: config.quizVersion || 1,
         archived: config.archived || false,
+        // NEW: add this line
+        registrationOpen: config.registrationOpen ?? true,
       },
     });
   } catch (err) {
@@ -860,17 +903,30 @@ app.get("/admin/config", async (req, res) => {
   }
 });
 
-app.post("/admin/config", async (req, res) => {
+ app.post("/admin/config", async (req, res) => {
   try {
-    const { startTime, durationMinutes, positiveMarks, negativeMarks, registrationFields, quizName, isQuizNameChanged } = req.body;
-    if (!startTime || durationMinutes == null || positiveMarks == null || negativeMarks == null)
+    const {
+      startTime,
+      durationMinutes,
+      positiveMarks,
+      negativeMarks,
+      registrationFields,
+      quizName,
+      isQuizNameChanged,
+      registrationOpen,      // <-- NEW
+    } = req.body;
+
+    if (!startTime || durationMinutes == null || positiveMarks == null || negativeMarks == null) {
       return res.status(400).json({ success: false, message: "Missing required fields" });
+    }
 
     let config = await ExamConfig.findOne();
     if (!config) config = new ExamConfig();
+
     const oldQuizName = config.quizName || "Trivia Quiz";
     const newQuizName = quizName || "Trivia Quiz";
 
+    // --- Quiz name change handling (unchanged) ---
     if (isQuizNameChanged && oldQuizName !== newQuizName) {
       console.log(`🔄 Quiz name changed from "${oldQuizName}" to "${newQuizName}". Archiving attempts...`);
 
@@ -905,18 +961,23 @@ app.post("/admin/config", async (req, res) => {
         await QuizAttempt.deleteMany(query);
         console.log(`🗄️ Archived ${attemptsToArchive.length} attempts from "${oldQuizName}" before name change.`);
       }
-      // Keep questions and students (they stay with their quizName)
     }
 
-    // Update config
+    // --- Update config fields ---
     config.quizName = newQuizName;
-    config.startTime = new Date(startTime); // frontend should send ISO with offset
+    config.startTime = new Date(startTime);
     config.durationMinutes = parseInt(durationMinutes);
     config.positiveMarks = parseFloat(positiveMarks);
     config.negativeMarks = parseFloat(negativeMarks);
     config.ranksFinalised = false;
-    config.archived = false; // reset archive flag on new config
+    config.archived = false;
 
+    // NEW: save registrationOpen if provided
+    if (registrationOpen !== undefined) {
+      config.registrationOpen = registrationOpen;
+    }
+
+    // --- Registration fields ---
     const map = new Map();
     if (registrationFields) {
       for (const [key, value] of Object.entries(registrationFields)) {
@@ -929,13 +990,15 @@ app.post("/admin/config", async (req, res) => {
     }
     config.registrationFields = map;
     config.updatedAt = new Date();
+
     await config.save();
 
-    // Rebuild CSVs for the new quiz
+    // --- Rebuild CSVs ---
     await rebuildCsv(newQuizName);
     await rebuildRegistrationCsv(newQuizName);
 
     startRankWatcher();
+
     res.json({ success: true, config });
   } catch (err) {
     console.error("Config update error:", err);
@@ -955,9 +1018,18 @@ app.get("/registration-config", async (req, res) => {
   }
 });
 
-app.post("/register", async (req, res) => {
+ app.post("/register", async (req, res) => {
   try {
     const config = await getExamConfig();
+
+    // NEW: Check if registration is open
+    if (config.registrationOpen === false) {
+      return res.status(403).json({
+        success: false,
+        message: "Registration is currently closed. Please contact the administrator."
+      });
+    }
+
     const extraFields = config.registrationFields ? Object.fromEntries(config.registrationFields) : {};
     const customData = new Map();
 
@@ -976,18 +1048,19 @@ app.post("/register", async (req, res) => {
       if (settings.required && !value) missing.push(fieldName);
       if (value !== undefined) customData.set(fieldName, value);
     }
-    if (missing.length)
+    if (missing.length) {
       return res.status(400).json({ success: false, message: `Required: ${missing.join(", ")}` });
+    }
 
     const quizName = config.quizName || "Trivia Quiz";
-    const existing = await Student.findOne({ 
-      "customData.email": email, 
-      "quizName": quizName 
+    const existing = await Student.findOne({
+      "customData.email": email,
+      "quizName": quizName
     });
     if (existing) {
-      return res.status(409).json({ 
-        success: false, 
-        message: "This email is already registered for the current quiz." 
+      return res.status(409).json({
+        success: false,
+        message: "This email is already registered for the current quiz."
       });
     }
 
@@ -997,7 +1070,7 @@ app.post("/register", async (req, res) => {
 
     await rebuildRegistrationCsv(quizName);
 
-    // ---------- PDF GENERATION (UPDATED) ----------
+    // ---------- PDF GENERATION (unchanged) ----------
     const doc = new PDFDocument({ size: "A4", margin: 50 });
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename=reg-${regNo}.pdf`);
@@ -1048,28 +1121,24 @@ app.post("/register", async (req, res) => {
     const labelColor = "#455a64";
     const valueColor = "#1e293b";
 
-    // ---- Registration No ----
     doc.fontSize(detailFontSize).font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Registration No:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
     doc.text(regNo, rightCol, yPos);
     yPos += 30;
 
-    // ---- Name ----
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Name:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
     doc.text(name, rightCol, yPos);
     yPos += 30;
 
-    // ---- Email ----
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Email:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
     doc.text(email, rightCol, yPos);
     yPos += 30;
 
-    // ---- Other custom fields ----
     for (const [fieldName, settings] of Object.entries(extraFields)) {
       if (!settings.enabled) continue;
       const value = customData.get(fieldName) || "";
@@ -1083,7 +1152,6 @@ app.post("/register", async (req, res) => {
       }
     }
 
-    // ---- Quiz Date & Time ----
     const startIST = config.startTime.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Quiz Date & Time (IST):", leftCol, yPos);
@@ -1091,14 +1159,12 @@ app.post("/register", async (req, res) => {
     doc.text(startIST, rightCol, yPos);
     yPos += 30;
 
-    // ---- Login ID (new field, like the others) ----
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Login ID:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
     doc.text(regNo, rightCol, yPos);
     yPos += 30;
 
-    // ---- Password (new field, like the others) ----
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Password:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
@@ -1112,7 +1178,6 @@ app.post("/register", async (req, res) => {
        .lineTo(pageWidth - 80, noteY - 5)
        .stroke();
 
-    // ---- Rules section (UPDATED) ----
     const rulesY = noteY + 30;
     doc.fontSize(16)
        .fillColor("#1a237e")
@@ -1151,7 +1216,6 @@ app.post("/register", async (req, res) => {
        .text("Generated by Trivia Quiz System", centerX, footerY, { align: "center" });
 
     doc.end();
-    // ---------- END PDF GENERATION ----------
 
   } catch (err) {
     console.error("Registration error:", err);
@@ -2323,6 +2387,7 @@ app.post('/admin/reset-config', async (req, res) => {
 app.post("/admin/reset-exam", async (req, res) => {
   try {
     let config = await ExamConfig.findOne();
+
     if (!config) {
       config = new ExamConfig({
         quizName: "Trivia Quiz",
@@ -2333,82 +2398,327 @@ app.post("/admin/reset-exam", async (req, res) => {
         registrationFields: new Map(),
         quizVersion: 1,
       });
+
       await config.save();
     }
 
-    const oldQuizName = config.quizName || "Trivia Quiz";
-    console.log(`🔄 Resetting exam for quiz: "${oldQuizName}"`);
+    const oldQuizName =
+      config.quizName || "Trivia Quiz";
 
-    let query = { submitted: true };
+    console.log(
+      `🔄 Resetting exam for quiz: "${oldQuizName}"`
+    );
+
+    // ============================================================
+    // 1. FIND ALL CURRENT REGISTRATIONS
+    // ============================================================
+
+    let studentQuery = {
+      quizName: oldQuizName,
+    };
+
+    // Trivia Quiz historically may have registrations
+    // with null/empty quizName.
     if (oldQuizName === "Trivia Quiz") {
-      query.$or = [
-        { quizName: oldQuizName },
-        { quizName: { $in: [null, "", undefined] } }
-      ];
-    } else {
-      query.quizName = oldQuizName;
+      studentQuery = {
+        $or: [
+          { quizName: oldQuizName },
+          { quizName: null },
+          { quizName: "" },
+        ],
+      };
     }
 
-    const attemptsToArchive = await QuizAttempt.find(query).lean();
-    if (attemptsToArchive.length > 0) {
-      const regNos = attemptsToArchive.map(a => a.studentRegNo);
-      const students = await Student.find({ regNo: { $in: regNos } }).lean();
-      const studentMap = {};
-      students.forEach(s => {
-        const custom = getCustomDataObject(s.customData);
-        studentMap[s.regNo] = { name: custom.name || "", email: custom.email || "" };
+    const studentsToArchive =
+      await Student.find(studentQuery).lean();
+
+    console.log(
+      `📋 Found ${studentsToArchive.length} registered students.`
+    );
+
+    // ============================================================
+    // 2. ARCHIVE ALL REGISTRATIONS
+    // ============================================================
+
+    if (studentsToArchive.length > 0) {
+      const archivedRegistrations =
+        studentsToArchive.map((student) => ({
+          regNo: student.regNo,
+
+          quizName: oldQuizName,
+
+          registeredAt:
+            student.registeredAt ||
+            student.createdAt ||
+            new Date(),
+
+          customData:
+            student.customData || {},
+
+          archivedAt: new Date(),
+        }));
+
+      // Remove duplicates if reset somehow gets called twice.
+      // We only want one archived registration per quiz/regNo.
+      await ArchivedQuizRegistration.deleteMany({
+        quizName: oldQuizName,
+        regNo: {
+          $in: archivedRegistrations.map(
+            (s) => s.regNo
+          ),
+        },
       });
 
-      const archivedDocs = attemptsToArchive.map(a => ({
-        ...a,
-        studentName: studentMap[a.studentRegNo]?.name || "",
-        studentEmail: studentMap[a.studentRegNo]?.email || "",
-        quizName: oldQuizName,
-        archivedAt: new Date(),
-      }));
-      await ArchivedQuizAttempt.insertMany(archivedDocs);
-      await QuizAttempt.deleteMany(query);
-      console.log(`📦 Auto‑archived ${attemptsToArchive.length} attempts for "${oldQuizName}" before reset.`);
+      await ArchivedQuizRegistration.insertMany(
+        archivedRegistrations
+      );
+
+      console.log(
+        `📦 Archived ${archivedRegistrations.length} registrations for "${oldQuizName}".`
+      );
     }
 
-    await Student.deleteMany({ quizName: oldQuizName });
+    // ============================================================
+    // 3. FIND SUBMITTED ATTEMPTS
+    // ============================================================
 
-    const newVersion = (config.quizVersion || 1) + 1;
-    config.quizVersion = newVersion;
+    let attemptQuery = {
+      submitted: true,
+    };
+
+    if (oldQuizName === "Trivia Quiz") {
+      attemptQuery.$or = [
+        { quizName: oldQuizName },
+        { quizName: null },
+        { quizName: "" },
+      ];
+    } else {
+      attemptQuery.quizName =
+        oldQuizName;
+    }
+
+    const attemptsToArchive =
+      await QuizAttempt.find(
+        attemptQuery
+      ).lean();
+
+    console.log(
+      `📝 Found ${attemptsToArchive.length} submitted attempts.`
+    );
+
+    // ============================================================
+    // 4. ARCHIVE SUBMITTED ATTEMPTS
+    // ============================================================
+
+    if (attemptsToArchive.length > 0) {
+      const regNos =
+        attemptsToArchive
+          .map(
+            (a) => a.studentRegNo
+          )
+          .filter(Boolean);
+
+      const students =
+        await Student.find({
+          regNo: {
+            $in: regNos,
+          },
+        }).lean();
+
+      const studentMap = {};
+
+      students.forEach((s) => {
+        const custom =
+          getCustomDataObject(
+            s.customData
+          );
+
+        studentMap[s.regNo] = {
+          name:
+            custom.name || "",
+          email:
+            custom.email || "",
+        };
+      });
+
+      const archivedDocs =
+        attemptsToArchive.map(
+          (attempt) => ({
+            ...attempt,
+
+            studentName:
+              studentMap[
+                attempt.studentRegNo
+              ]?.name || "",
+
+            studentEmail:
+              studentMap[
+                attempt.studentRegNo
+              ]?.email || "",
+
+            quizName:
+              oldQuizName,
+
+            archivedAt:
+              new Date(),
+          })
+        );
+
+      await ArchivedQuizAttempt.insertMany(
+        archivedDocs
+      );
+
+      // Remove the submitted attempts
+      await QuizAttempt.deleteMany(
+        attemptQuery
+      );
+
+      console.log(
+        `📦 Archived ${attemptsToArchive.length} submitted attempts.`
+      );
+    }
+
+    // ============================================================
+    // 5. DELETE OLD CURRENT REGISTRATIONS
+    // ============================================================
+
+    if (studentsToArchive.length > 0) {
+      await Student.deleteMany(
+        studentQuery
+      );
+
+      console.log(
+        `🗑️ Deleted ${studentsToArchive.length} old registrations from Student.`
+      );
+    }
+
+    // ============================================================
+    // 6. START NEW QUIZ VERSION
+    // ============================================================
+
+    const newVersion =
+      (config.quizVersion || 1) + 1;
+
+    config.quizVersion =
+      newVersion;
+
     await Counter.findOneAndUpdate(
-      { _id: `regNo_${newVersion}` },
-      { $set: { seq: 0 } },
-      { upsert: true }
+      {
+        _id: `regNo_${newVersion}`,
+      },
+      {
+        $set: {
+          seq: 0,
+        },
+      },
+      {
+        upsert: true,
+      }
     );
 
     const now = new Date();
-    const newStart = new Date(now.getTime() + 5 * 60000);
-    config.startTime = newStart;
-    config.ranksFinalised = false;
-    config.archived = false;
-    config.durationMinutes = 30;
-    config.positiveMarks = 1;
-    config.negativeMarks = 0;
 
+    const newStart =
+      new Date(
+        now.getTime() +
+          5 * 60000
+      );
+
+    config.startTime =
+      newStart;
+
+    config.ranksFinalised =
+      false;
+
+    config.archived =
+      false;
+
+    config.durationMinutes =
+      30;
+
+    config.positiveMarks =
+      1;
+
+    config.negativeMarks =
+      0;
+
+    // Optional new quiz name
     if (req.body?.quizName) {
-      config.quizName = req.body.quizName;
+      config.quizName =
+        req.body.quizName;
     }
+
     await config.save();
 
-    await rebuildCsv(config.quizName);
-    await rebuildRegistrationCsv(config.quizName);
+    // ============================================================
+    // 7. REBUILD CSVs FOR NEW QUIZ
+    // ============================================================
+
+    await rebuildCsv(
+      config.quizName
+    );
+
+    await rebuildRegistrationCsv(
+      config.quizName
+    );
 
     startRankWatcher();
 
+    // ============================================================
+    // 8. RESPONSE
+    // ============================================================
+
+    const submittedCount =
+      attemptsToArchive.length;
+
+    const notSubmittedCount =
+      studentsToArchive.length -
+      new Set(
+        attemptsToArchive.map(
+          (a) =>
+            String(
+              a.studentRegNo || ""
+            )
+        )
+      ).size;
+
     res.json({
       success: true,
-      message: `Exam reset. New version: ${newVersion}. New start time: ${newStart.toISOString()}. Archived ${attemptsToArchive.length} old attempts. Questions kept.`,
-      startTime: newStart,
-      quizVersion: newVersion,
+
+      message:
+        `Exam reset successfully. ` +
+        `New version: ${newVersion}. ` +
+        `Archived ${studentsToArchive.length} registrations, ` +
+        `${submittedCount} submitted attempts, ` +
+        `${notSubmittedCount} not-submitted registrations.`,
+
+      startTime:
+        newStart,
+
+      quizVersion:
+        newVersion,
+
+      archivedRegistrations:
+        studentsToArchive.length,
+
+      archivedSubmitted:
+        submittedCount,
+
+      archivedNotSubmitted:
+        notSubmittedCount,
     });
   } catch (err) {
-    console.error("❌ Reset exam error:", err);
-    res.status(500).json({ success: false, message: err.message });
+    console.error(
+      "❌ Reset exam error:",
+      err
+    );
+
+    res.status(500).json({
+      success: false,
+      message:
+        err.message ||
+        "Failed to reset exam.",
+    });
   }
 });
 
@@ -2721,17 +3031,50 @@ app.get("/quiz-status", async (req, res) => {
   }
 });
 // ============ CRUD ROUTES FOR QUESTIONS ============
-app.get("/questions", async (req, res) => {
+ app.get("/questions", async (req, res) => {
   try {
     const config = await getExamConfig();
-    const quizName = config.quizName || "Trivia Quiz";
-    const questions = await Question.find({ quizName }).sort({ createdAt: -1 });
-    res.json({ success: true, questions });
+
+    const quizName =
+      config.quizName || "Trivia Quiz";
+
+    let query;
+
+    if (quizName === "Trivia Quiz") {
+      query = {
+        $or: [
+          { quizName: "Trivia Quiz" },
+          { quizName: null },
+          { quizName: "" },
+        ],
+      };
+    } else {
+      query = {
+        quizName,
+      };
+    }
+
+    const questions = await Question.find(query)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json({
+      success: true,
+      questions,
+      quizName,
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: "Server error" });
+    console.error(
+      "Get questions error:",
+      err
+    );
+
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
   }
 });
-
 app.post("/post-question", upload.single("image"), async (req, res) => {
   try {
     let { question, options, correctAnswer } = req.body;
@@ -2787,7 +3130,246 @@ app.put("/update-question/:id", upload.single("image"), async (req, res) => {
     res.status(500).json({ success: false, message: "Update failed" });
   }
 });
+app.get(
+  "/admin/archived-not-submitted-csv/:quizName",
+  async (req, res) => {
+    try {
+      const quizName = decodeURIComponent(
+        req.params.quizName
+      );
 
+      console.log(
+        `📋 Not-submitted CSV requested for: "${quizName}"`
+      );
+
+      // --------------------------------------------------
+      // 1. Find archived registrations
+      // --------------------------------------------------
+
+      const registrations =
+        await ArchivedQuizRegistration.find({
+          quizName,
+        })
+          .sort({ registeredAt: 1 })
+          .lean();
+
+      console.log(
+        `📋 Archived registrations: ${registrations.length}`
+      );
+
+      if (registrations.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message:
+            `No archived registrations found for "${quizName}". ` +
+            `Make sure the NEW reset-exam route was used.`,
+        });
+      }
+
+      // --------------------------------------------------
+      // 2. Find submitted attempts
+      // --------------------------------------------------
+
+      const submittedAttempts =
+        await ArchivedQuizAttempt.find({
+          quizName,
+        })
+          .select("studentRegNo")
+          .lean();
+
+      console.log(
+        `📝 Archived submitted attempts: ${submittedAttempts.length}`
+      );
+
+      // --------------------------------------------------
+      // 3. Build submitted registration-number Set
+      // --------------------------------------------------
+
+      const submittedRegNos = new Set(
+        submittedAttempts
+          .map((attempt) =>
+            String(
+              attempt.studentRegNo || ""
+            )
+              .trim()
+              .toLowerCase()
+          )
+          .filter(Boolean)
+      );
+
+      // --------------------------------------------------
+      // 4. Registered but NOT submitted
+      // --------------------------------------------------
+
+      const notSubmitted =
+        registrations.filter((student) => {
+          const regNo = String(
+            student.regNo || ""
+          )
+            .trim()
+            .toLowerCase();
+
+          return (
+            regNo &&
+            !submittedRegNos.has(regNo)
+          );
+        });
+
+      console.log(
+        `⏳ Not submitted: ${notSubmitted.length}`
+      );
+
+      // --------------------------------------------------
+      // 5. Convert customData
+      // --------------------------------------------------
+
+      const getCustomValue = (
+        customData,
+        key
+      ) => {
+        if (!customData) {
+          return "";
+        }
+
+        if (
+          customData instanceof Map
+        ) {
+          return (
+            customData.get(key) || ""
+          );
+        }
+
+        return (
+          customData[key] || ""
+        );
+      };
+
+      // --------------------------------------------------
+      // 6. Prepare CSV records
+      // --------------------------------------------------
+
+      const records =
+        notSubmitted.map((student) => ({
+          regNo:
+            student.regNo || "",
+
+          name:
+            getCustomValue(
+              student.customData,
+              "name"
+            ),
+
+          email:
+            getCustomValue(
+              student.customData,
+              "email"
+            ),
+
+          registeredAt:
+            student.registeredAt
+              ? new Date(
+                  student.registeredAt
+                ).toLocaleString(
+                  "en-IN",
+                  {
+                    timeZone:
+                      "Asia/Kolkata",
+                  }
+                )
+              : "",
+        }));
+
+      // --------------------------------------------------
+      // 7. Create CSV
+      // --------------------------------------------------
+
+      const safeQuizName =
+        quizName.replace(
+          /[^a-zA-Z0-9-_]/g,
+          "_"
+        );
+
+      const csvPath = path.join(
+        resultsDir,
+        `archived_not_submitted_${safeQuizName}.csv`
+      );
+
+      const writer =
+        createObjectCsvWriter({
+          path: csvPath,
+
+          header: [
+            {
+              id: "regNo",
+              title: "RegNo",
+            },
+            {
+              id: "name",
+              title: "Name",
+            },
+            {
+              id: "email",
+              title: "Email",
+            },
+            {
+              id: "registeredAt",
+              title: "Registration Time",
+            },
+          ],
+
+          append: false,
+        });
+
+      await writer.writeRecords(
+        records
+      );
+
+      // --------------------------------------------------
+      // 8. Download CSV
+      // --------------------------------------------------
+
+      const downloadName =
+        `archived_not_submitted_${safeQuizName}.csv`;
+
+      res.download(
+        csvPath,
+        downloadName,
+        (err) => {
+          if (err) {
+            console.error(
+              "❌ CSV download error:",
+              err
+            );
+          }
+
+          fs.unlink(
+            csvPath,
+            (unlinkErr) => {
+              if (unlinkErr) {
+                console.error(
+                  "❌ Failed to remove temp CSV:",
+                  unlinkErr
+                );
+              }
+            }
+          );
+        }
+      );
+    } catch (err) {
+      console.error(
+        "❌ Not-submitted CSV error:",
+        err
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          "Failed to generate not-submitted CSV.",
+        error: err.message,
+      });
+    }
+  }
+);
 app.delete("/delete-question/:id", async (req, res) => {
   try {
     await Question.findByIdAndDelete(req.params.id);
