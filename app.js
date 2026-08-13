@@ -627,6 +627,42 @@ function startRankWatcher() {
     "👀 Rank/quiz lifecycle watcher started."
   );
 }
+async function disqualifyNoShows(quizName, quizEndTime) {
+  // 1. Get all students registered for this quiz
+  let studentQuery = { quizName };
+  if (quizName === "Trivia Quiz") {
+    studentQuery = { $or: [{ quizName }, { quizName: { $in: [null, "", undefined] } }] };
+  }
+  const students = await Student.find(studentQuery).lean();
+
+  // 2. Get all existing attempts
+  const attempts = await QuizAttempt.find({ quizName }).lean();
+  const attemptedRegNos = new Set(attempts.map(a => a.studentRegNo));
+
+  // 3. Find students without an attempt and create a disqualified record
+  const noShows = students.filter(s => !attemptedRegNos.has(s.regNo));
+
+  if (noShows.length > 0) {
+    const config = await getExamConfig();
+    const noShowDocs = noShows.map(s => ({
+      studentRegNo: s.regNo,
+      quizName: quizName,
+      startTime: config.startTime,
+      endTime: quizEndTime,
+      durationMinutes: config.durationMinutes,
+      answers: [],
+      score: -1,
+      totalMarksObtained: -1,
+      totalTimeMinutes: 0,
+      disqualified: true,
+      submitted: true,
+      rank: -1
+    }));
+
+    await QuizAttempt.insertMany(noShowDocs);
+    console.log(`🚫 Disqualified ${noShows.length} students who registered but never logged in.`);
+  }
+}
 // ==================== NEW FUNCTIONS ====================
 
 async function disqualifyOverdueAttempts(quizName, quizEndTime) {
@@ -638,18 +674,16 @@ async function disqualifyOverdueAttempts(quizName, quizEndTime) {
 
   let count = 0;
   for (let a of overdue) {
-    const personalEnd = new Date(a.startTime.getTime() + a.durationMinutes * 60000);
-    if (personalEnd <= quizEndTime) {
-      a.disqualified = true;
-      a.score = -1;
-      a.totalMarksObtained = -1;
-      a.totalTimeMinutes = Math.round(((quizEndTime - a.startTime) / 60000) * 100) / 100;
-      a.submitted = true;
-      a.endTime = quizEndTime;
-      a.rank = -1;
-      await a.save();
-      count++;
-    }
+    // If the global exam has ended, they are overdue regardless of personal end time.
+    a.disqualified = true;
+    a.score = -1;
+    a.totalMarksObtained = -1;
+    a.totalTimeMinutes = Math.round(((quizEndTime - a.startTime) / 60000) * 100) / 100;
+    a.submitted = true;
+    a.endTime = quizEndTime;
+    a.rank = -1;
+    await a.save();
+    count++;
   }
   if (count > 0) console.log(`🚫 Disqualified ${count} overdue unsubmitted attempts.`);
   return count;
@@ -747,6 +781,7 @@ async function disqualifyOverdueAttempts(quizName, quizEndTime) {
       quizName,
       quizEnd
     );
+    await disqualifyNoShows(quizName, quizEnd);
 
     // ------------------------------------------------------------
     // Fetch all submitted, non-disqualified attempts
