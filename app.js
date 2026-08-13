@@ -1,4 +1,4 @@
- require("dotenv").config();
+require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -11,6 +11,19 @@ const { createObjectCsvWriter } = require("csv-writer");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const nodemailer = require('nodemailer');
+
+// In-memory OTP store: { email: { otp, expiresAt, registrationData } }
+const otpStore = {};
+
+// Email transporter
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
 // --------------- MIDDLEWARE ---------------
 app.use(cors({
   origin: true,
@@ -172,6 +185,15 @@ const counterSchema = new mongoose.Schema({
 const Counter = mongoose.model("Counter", counterSchema);
 
 // ============ HELPERS ============
+async function sendOTPEmail(email, otp) {
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: 'Your OTP for Quiz Registration',
+    text: `Your OTP is ${otp}. It will expire in 5 minutes.`,
+  };
+  await transporter.sendMail(mailOptions);
+}
 
 async function getExamConfig() {
   let config = await ExamConfig.findOne();
@@ -1096,59 +1118,108 @@ app.get("/registration-config", async (req, res) => {
   }
 });
 
- app.post("/register", async (req, res) => {
+app.post("/register", async (req, res) => {
   try {
     const config = await getExamConfig();
-
-    // NEW: Check if registration is open
     if (config.registrationOpen === false) {
-      return res.status(403).json({
-        success: false,
-        message: "Registration is currently closed. Please contact the administrator."
-      });
+      return res.status(403).json({ success: false, message: "Registration is closed." });
     }
 
-    const extraFields = config.registrationFields ? Object.fromEntries(config.registrationFields) : {};
-    const customData = new Map();
-
-    const name = req.body.name;
-    const email = req.body.email;
+    const { name, email, ...extraFields } = req.body;
     if (!name || !email) {
       return res.status(400).json({ success: false, message: "Name and email are required." });
     }
+
+    // Check if already registered for this quiz
+    const existing = await Student.findOne({
+      "customData.email": email,
+      quizName: config.quizName,
+    });
+    if (existing) {
+      return res.status(409).json({ success: false, message: "This email is already registered for the current quiz." });
+    }
+
+    // Build customData
+    const customData = new Map();
     customData.set('name', name);
     customData.set('email', email);
 
-    const missing = [];
-    for (const [fieldName, settings] of Object.entries(extraFields)) {
+    const extraFieldsConfig = config.registrationFields ? Object.fromEntries(config.registrationFields) : {};
+    for (const [fieldName, settings] of Object.entries(extraFieldsConfig)) {
       if (!settings.enabled) continue;
       const value = req.body[fieldName];
-      if (settings.required && !value) missing.push(fieldName);
+      if (settings.required && !value) {
+        return res.status(400).json({ success: false, message: `Missing required field: ${fieldName}` });
+      }
       if (value !== undefined) customData.set(fieldName, value);
     }
-    if (missing.length) {
-      return res.status(400).json({ success: false, message: `Required: ${missing.join(", ")}` });
-    }
 
-    const quizName = config.quizName || "Trivia Quiz";
-    const existing = await Student.findOne({
-      "customData.email": email,
-      "quizName": quizName
+    // Generate OTP (6 digits)
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
+
+    // Store pending registration
+    otpStore[email] = {
+      otp,
+      expiresAt,
+      registrationData: {
+        quizName: config.quizName,
+        customData: Object.fromEntries(customData),
+      },
+    };
+
+    // Send OTP email
+    await sendOTPEmail(email, otp);
+
+    res.json({
+      success: true,
+      message: "OTP sent to your email. Please verify to complete registration.",
+      email,
     });
-    if (existing) {
-      return res.status(409).json({
-        success: false,
-        message: "This email is already registered for the current quiz."
-      });
+  } catch (err) {
+    console.error("Registration error:", err);
+    res.status(500).json({ success: false, message: "Registration failed. Please try again." });
+  }
+});
+app.post("/verify-otp", async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, message: "Email and OTP are required." });
     }
 
+    const pending = otpStore[email];
+    if (!pending) {
+      return res.status(400).json({ success: false, message: "No pending registration found for this email." });
+    }
+
+    if (Date.now() > pending.expiresAt) {
+      delete otpStore[email];
+      return res.status(400).json({ success: false, message: "OTP has expired. Please register again." });
+    }
+
+    if (pending.otp !== otp) {
+      return res.status(400).json({ success: false, message: "Invalid OTP. Please try again." });
+    }
+
+    // OTP verified – create the student
+    const { quizName, customData } = pending.registrationData;
     const regNo = await generateRegNo();
-    const student = new Student({ regNo, quizName, customData });
+
+    const student = new Student({
+      regNo,
+      quizName,
+      customData: new Map(Object.entries(customData)),
+    });
     await student.save();
 
+    // Rebuild registration CSV
     await rebuildRegistrationCsv(quizName);
 
-    // ---------- PDF GENERATION (unchanged) ----------
+    // Clear the OTP entry
+    delete otpStore[email];
+
+    // ---------- PDF GENERATION ----------
     const doc = new PDFDocument({ size: "A4", margin: 50 });
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename=reg-${regNo}.pdf`);
@@ -1205,21 +1276,27 @@ app.get("/registration-config", async (req, res) => {
     doc.text(regNo, rightCol, yPos);
     yPos += 30;
 
+    // Name
+    const name = customData.name || "";
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Name:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
     doc.text(name, rightCol, yPos);
     yPos += 30;
 
+    // Email
+    const emailVal = customData.email || "";
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Email:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
-    doc.text(email, rightCol, yPos);
+    doc.text(emailVal, rightCol, yPos);
     yPos += 30;
 
-    for (const [fieldName, settings] of Object.entries(extraFields)) {
+    // Extra fields
+    const extraFieldsConfig = await getExamConfig().registrationFields ? Object.fromEntries((await getExamConfig()).registrationFields) : {};
+    for (const [fieldName, settings] of Object.entries(extraFieldsConfig)) {
       if (!settings.enabled) continue;
-      const value = customData.get(fieldName) || "";
+      const value = customData[fieldName] || "";
       if (value) {
         const label = fieldName.charAt(0).toUpperCase() + fieldName.slice(1);
         doc.font("Helvetica-Bold").fillColor(labelColor);
@@ -1230,6 +1307,8 @@ app.get("/registration-config", async (req, res) => {
       }
     }
 
+    // Start time
+    const config = await getExamConfig();
     const startIST = config.startTime.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Quiz Date & Time (IST):", leftCol, yPos);
@@ -1237,18 +1316,21 @@ app.get("/registration-config", async (req, res) => {
     doc.text(startIST, rightCol, yPos);
     yPos += 30;
 
+    // Login ID
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Login ID:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
     doc.text(regNo, rightCol, yPos);
     yPos += 30;
 
+    // Password
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Password:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
-    doc.text(email, rightCol, yPos);
+    doc.text(emailVal, rightCol, yPos);
     yPos += 30;
 
+    // Rules section (unchanged)
     const noteY = cardY + cardHeight + 20;
     doc.strokeColor("#b0bec5")
        .lineWidth(1)
@@ -1296,10 +1378,11 @@ app.get("/registration-config", async (req, res) => {
     doc.end();
 
   } catch (err) {
-    console.error("Registration error:", err);
-    res.status(500).json({ success: false, message: "Registration failed" });
+    console.error("OTP verification error:", err);
+    res.status(500).json({ success: false, message: "Verification failed. Please try again." });
   }
 });
+
 app.get("/questions-csv", async (req, res) => {
   try {
     const config = await getExamConfig();
@@ -3153,7 +3236,7 @@ app.get("/admin/not-submitted-live-csv", async (req, res) => {
     const config = await getExamConfig();
     const quizName = config.quizName || "Trivia Quiz";
 
-    // 1️⃣ Find all students registered for this quiz
+    // 1. All registered students
     let studentQuery = { quizName };
     if (quizName === "Trivia Quiz") {
       studentQuery = {
@@ -3164,7 +3247,6 @@ app.get("/admin/not-submitted-live-csv", async (req, res) => {
       };
     }
     const students = await Student.find(studentQuery).lean();
-
     if (students.length === 0) {
       return res.status(404).json({
         success: false,
@@ -3172,36 +3254,45 @@ app.get("/admin/not-submitted-live-csv", async (req, res) => {
       });
     }
 
-    // 2️⃣ Find all students who have a submitted attempt (including disqualified)
+    // 2. All submitted attempts (including disqualified)
     const submittedAttempts = await QuizAttempt.find({
       quizName,
       submitted: true,
     })
-      .select("studentRegNo")
+      .select("studentRegNo disqualified")
       .lean();
 
-    const submittedRegNos = new Set(
-      submittedAttempts
-        .map((a) => String(a.studentRegNo).trim().toLowerCase())
-        .filter(Boolean)
-    );
+    // Build sets
+    const submittedRegNos = new Set();
+    const disqualifiedRegNos = new Set();
+    for (const att of submittedAttempts) {
+      const reg = String(att.studentRegNo).trim().toLowerCase();
+      if (reg) {
+        submittedRegNos.add(reg);
+        if (att.disqualified === true) {
+          disqualifiedRegNos.add(reg);
+        }
+      }
+    }
 
-    // 3️⃣ Filter those who do NOT have a submitted attempt
-    const notSubmitted = students.filter((s) => {
-      const regNo = String(s.regNo).trim().toLowerCase();
-      return regNo && !submittedRegNos.has(regNo);
+    // 3. Filter: students who are either NOT submitted OR disqualified
+    const includedStudents = students.filter((s) => {
+      const reg = String(s.regNo).trim().toLowerCase();
+      if (!reg) return false;
+      // Include if not submitted at all, or disqualified
+      return !submittedRegNos.has(reg) || disqualifiedRegNos.has(reg);
     });
 
-    if (notSubmitted.length === 0) {
+    if (includedStudents.length === 0) {
       return res.status(404).json({
         success: false,
-        message: "All registered students have submitted the quiz.",
+        message: "All registered students have submitted and are not disqualified.",
       });
     }
 
-    // 4️⃣ Build CSV with custom fields
+    // 4. Build CSV with custom fields + Status
     const allCustomKeys = new Set();
-    notSubmitted.forEach((s) => {
+    includedStudents.forEach((s) => {
       const data = getCustomDataMap(s.customData);
       data.forEach((_, key) => allCustomKeys.add(key));
     });
@@ -3212,6 +3303,7 @@ app.get("/admin/not-submitted-live-csv", async (req, res) => {
     const header = [
       { id: "regNo", title: "RegNo" },
       { id: "registeredAt", title: "Registration Time" },
+      { id: "status", title: "Status" }, // new column
     ];
     sortedKeys.forEach((key) => {
       header.push({
@@ -3220,11 +3312,13 @@ app.get("/admin/not-submitted-live-csv", async (req, res) => {
       });
     });
 
-    const records = notSubmitted.map((s) => {
+    const records = includedStudents.map((s) => {
+      const reg = String(s.regNo).trim().toLowerCase();
       const data = getCustomDataMap(s.customData);
       const record = {
         regNo: s.regNo,
         registeredAt: s.registeredAt.toISOString(),
+        status: disqualifiedRegNos.has(reg) ? "Disqualified" : "Not Submitted",
       };
       sortedKeys.forEach((key) => {
         record[key] = data.get(key) || "";
@@ -3232,7 +3326,7 @@ app.get("/admin/not-submitted-live-csv", async (req, res) => {
       return record;
     });
 
-    // 5️⃣ Generate and send CSV
+    // 5. Generate and send CSV
     const safeQuizName = quizName.replace(/[^a-zA-Z0-9-_]/g, "_");
     const csvPath = path.join(
       resultsDir,
@@ -3255,6 +3349,120 @@ app.get("/admin/not-submitted-live-csv", async (req, res) => {
     });
   } catch (err) {
     console.error("❌ Not-submitted live CSV error:", err);
+    res.status(500).json({
+      success: false,
+      message: err.message || "Server error",
+    });
+  }
+});
+app.get("/admin/archived-not-submitted-csv/:quizName", async (req, res) => {
+  try {
+    const quizName = decodeURIComponent(req.params.quizName);
+
+    // 1. Archived registrations
+    const registrations = await ArchivedQuizRegistration.find({ quizName })
+      .sort({ registeredAt: 1 })
+      .lean();
+
+    if (registrations.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No archived registrations found for "${quizName}".`,
+      });
+    }
+
+    // 2. Archived submitted attempts (includes disqualified)
+    const submittedAttempts = await ArchivedQuizAttempt.find({
+      quizName,
+      submitted: true,
+    })
+      .select("studentRegNo disqualified")
+      .lean();
+
+    const submittedRegNos = new Set();
+    const disqualifiedRegNos = new Set();
+    for (const att of submittedAttempts) {
+      const reg = String(att.studentRegNo).trim().toLowerCase();
+      if (reg) {
+        submittedRegNos.add(reg);
+        if (att.disqualified === true) {
+          disqualifiedRegNos.add(reg);
+        }
+      }
+    }
+
+    // 3. Include those not submitted OR disqualified
+    const included = registrations.filter((s) => {
+      const reg = String(s.regNo).trim().toLowerCase();
+      if (!reg) return false;
+      return !submittedRegNos.has(reg) || disqualifiedRegNos.has(reg);
+    });
+
+    if (included.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "All registered students submitted and are not disqualified.",
+      });
+    }
+
+    // 4. Build CSV
+    const allCustomKeys = new Set();
+    included.forEach((s) => {
+      const data = getCustomDataMap(s.customData || {});
+      data.forEach((_, key) => allCustomKeys.add(key));
+    });
+    allCustomKeys.add("name");
+    allCustomKeys.add("email");
+    const sortedKeys = Array.from(allCustomKeys).sort();
+
+    const header = [
+      { id: "regNo", title: "RegNo" },
+      { id: "registeredAt", title: "Registration Time" },
+      { id: "status", title: "Status" },
+    ];
+    sortedKeys.forEach((key) => {
+      header.push({
+        id: key,
+        title: key.charAt(0).toUpperCase() + key.slice(1),
+      });
+    });
+
+    const records = included.map((s) => {
+      const reg = String(s.regNo).trim().toLowerCase();
+      const data = getCustomDataMap(s.customData || {});
+      const record = {
+        regNo: s.regNo,
+        registeredAt: s.registeredAt ? new Date(s.registeredAt).toISOString() : "",
+        status: disqualifiedRegNos.has(reg) ? "Disqualified" : "Not Submitted",
+      };
+      sortedKeys.forEach((key) => {
+        record[key] = data.get(key) || "";
+      });
+      return record;
+    });
+
+    const safeQuizName = quizName.replace(/[^a-zA-Z0-9-_]/g, "_");
+    const csvPath = path.join(
+      resultsDir,
+      `archived_not_submitted_${safeQuizName}.csv`
+    );
+
+    const writer = createObjectCsvWriter({
+      path: csvPath,
+      header,
+      append: false,
+    });
+    await writer.writeRecords(records);
+
+    const downloadName = `archived_not_submitted_${safeQuizName}.csv`;
+    res.download(csvPath, downloadName, (err) => {
+      if (err) console.error("CSV download error:", err);
+      fs.unlink(csvPath, (unlinkErr) => {
+        if (unlinkErr) console.error("Failed to delete temp CSV:", unlinkErr);
+      });
+    });
+  } catch (err) {
+    console.error("❌ Archived not-submitted CSV error:", err);
     res.status(500).json({
       success: false,
       message: err.message || "Server error",
@@ -3742,4 +3950,3 @@ app.listen(PORT, () => {
     console.log(`⏰ Quiz start (UTC): ${c.startTime.toISOString()}`)
   );
 });
-
