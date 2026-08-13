@@ -2993,6 +2993,127 @@ app.get("/results-csv", async (req, res) => {
     res.status(500).json({ success: false, message: "Server error: " + err.message });
   }
 });
+app.get("/admin/archived-not-submitted-csv/:quizName", async (req, res) => {
+  try {
+    const quizName = decodeURIComponent(req.params.quizName);
+
+    // 1️⃣ Find all archived registrations for this quiz
+    let regQuery = { quizName };
+    // For legacy "Trivia Quiz" registrations may have null/empty
+    if (quizName === "Trivia Quiz") {
+      regQuery = {
+        $or: [
+          { quizName: "Trivia Quiz" },
+          { quizName: { $in: [null, "", undefined] } },
+        ],
+      };
+    }
+    const registrations = await ArchivedQuizRegistration.find(regQuery)
+      .sort({ registeredAt: 1 })
+      .lean();
+
+    if (registrations.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No archived registrations found for "${quizName}".`,
+      });
+    }
+
+    // 2️⃣ Find all archived submitted attempts for this quiz
+    let attemptQuery = {};
+    if (quizName === "Trivia Quiz") {
+      attemptQuery.$or = [
+        { quizName: "Trivia Quiz" },
+        { quizName: { $in: [null, "", undefined] } },
+      ];
+    } else {
+      attemptQuery.quizName = quizName;
+    }
+    const submittedAttempts = await ArchivedQuizAttempt.find(attemptQuery)
+      .select("studentRegNo")
+      .lean();
+
+    const submittedRegNos = new Set(
+      submittedAttempts
+        .map((a) => String(a.studentRegNo).trim().toLowerCase())
+        .filter(Boolean)
+    );
+
+    // 3️⃣ Filter registrations that are NOT in the submitted set
+    const notSubmitted = registrations.filter((reg) => {
+      const regNo = String(reg.regNo).trim().toLowerCase();
+      return regNo && !submittedRegNos.has(regNo);
+    });
+
+    if (notSubmitted.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "All registered students submitted this quiz.",
+      });
+    }
+
+    // 4️⃣ Build CSV with custom fields from registration
+    const allCustomKeys = new Set();
+    notSubmitted.forEach((reg) => {
+      const data = getCustomDataMap(reg.customData);
+      data.forEach((_, key) => allCustomKeys.add(key));
+    });
+    allCustomKeys.add("name");
+    allCustomKeys.add("email");
+    const sortedKeys = Array.from(allCustomKeys).sort();
+
+    const header = [
+      { id: "regNo", title: "RegNo" },
+      { id: "registeredAt", title: "Registration Time" },
+    ];
+    sortedKeys.forEach((key) => {
+      header.push({
+        id: key,
+        title: key.charAt(0).toUpperCase() + key.slice(1),
+      });
+    });
+
+    const records = notSubmitted.map((reg) => {
+      const data = getCustomDataMap(reg.customData);
+      const record = {
+        regNo: reg.regNo,
+        registeredAt: reg.registeredAt ? reg.registeredAt.toISOString() : "",
+      };
+      sortedKeys.forEach((key) => {
+        record[key] = data.get(key) || "";
+      });
+      return record;
+    });
+
+    // 5️⃣ Generate CSV
+    const safeQuizName = quizName.replace(/[^a-zA-Z0-9-_]/g, "_");
+    const csvPath = path.join(
+      resultsDir,
+      `archived_not_submitted_${safeQuizName}.csv`
+    );
+
+    const writer = createObjectCsvWriter({
+      path: csvPath,
+      header,
+      append: false,
+    });
+    await writer.writeRecords(records);
+
+    const downloadName = `archived_not_submitted_${safeQuizName}.csv`;
+    res.download(csvPath, downloadName, (err) => {
+      if (err) console.error("CSV download error:", err);
+      fs.unlink(csvPath, (unlinkErr) => {
+        if (unlinkErr) console.error("Failed to delete temp CSV:", unlinkErr);
+      });
+    });
+  } catch (err) {
+    console.error("❌ Archived not-submitted CSV error:", err);
+    res.status(500).json({
+      success: false,
+      message: err.message || "Server error",
+    });
+  }
+});
 app.get("/admin/not-submitted-live-csv", async (req, res) => {
   try {
     const config = await getExamConfig();
