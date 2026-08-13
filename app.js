@@ -3372,7 +3372,7 @@ app.get("/admin/not-submitted-live-csv", async (req, res) => {
     });
   }
 });
-a 
+
 app.get("/registrations-csv", async (req, res) => {
   try {
     const config = await getExamConfig();
