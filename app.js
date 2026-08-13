@@ -2941,12 +2941,48 @@ app.get("/results-csv", async (req, res) => {
     const config = await getExamConfig();
     const quizName = config.quizName || "Trivia Quiz";
     const filePath = getCsvPath(quizName);
+
+    // -----------------------------------------------------------------
+    // 1. Check if the live CSV exists and has actual data (not just headers)
+    // -----------------------------------------------------------------
+    let shouldRedirectToArchived = false;
+
     if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ success: false, message: "No results yet for this quiz" });
+      shouldRedirectToArchived = true;
+    } else {
+      const content = fs.readFileSync(filePath, "utf8");
+      const lines = content.split("\n").filter(line => line.trim() !== "");
+      if (lines.length <= 1) {
+        // Only header row or completely empty
+        shouldRedirectToArchived = true;
+      }
     }
+
+    // -----------------------------------------------------------------
+    // 2. If live CSV is empty, check if there are archived attempts
+    // -----------------------------------------------------------------
+    if (shouldRedirectToArchived) {
+      const archivedCount = await ArchivedQuizAttempt.countDocuments({ quizName });
+      if (archivedCount === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "No results available for this quiz (live or archived)."
+        });
+      }
+
+      // Redirect to the existing archived-csv endpoint
+      // which will generate and download the archived results
+      return res.redirect(`/admin/archived-csv/${encodeURIComponent(quizName)}`);
+    }
+
+    // -----------------------------------------------------------------
+    // 3. Otherwise, serve the live CSV
+    // -----------------------------------------------------------------
     const downloadName = `results_${quizName.replace(/[^a-zA-Z0-9-_]/g, "_")}.csv`;
     res.download(filePath, downloadName);
+
   } catch (err) {
+    console.error("Results CSV error:", err);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
