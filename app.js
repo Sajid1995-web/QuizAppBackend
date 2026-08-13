@@ -1106,256 +1106,59 @@ app.get("/registration-config", async (req, res) => {
   }
 });
 
-app.post("/register", async (req, res) => {
+ app.post("/register", async (req, res) => {
   try {
     const config = await getExamConfig();
+
+    // NEW: Check if registration is open
     if (config.registrationOpen === false) {
-      return res.status(403).json({ success: false, message: "Registration is closed." });
+      return res.status(403).json({
+        success: false,
+        message: "Registration is currently closed. Please contact the administrator."
+      });
     }
 
-    const { name, email, ...extraFields } = req.body;
+    const extraFields = config.registrationFields ? Object.fromEntries(config.registrationFields) : {};
+    const customData = new Map();
+
+    const name = req.body.name;
+    const email = req.body.email;
     if (!name || !email) {
       return res.status(400).json({ success: false, message: "Name and email are required." });
     }
-
-    // Check if already registered for this quiz
-    const existing = await Student.findOne({
-      "customData.email": email,
-      quizName: config.quizName,
-    });
-    if (existing) {
-      return res.status(409).json({ success: false, message: "This email is already registered for the current quiz." });
-    }
-
-    // Build customData
-    const customData = new Map();
     customData.set('name', name);
     customData.set('email', email);
 
-    const extraFieldsConfig = config.registrationFields ? Object.fromEntries(config.registrationFields) : {};
-    for (const [fieldName, settings] of Object.entries(extraFieldsConfig)) {
+    const missing = [];
+    for (const [fieldName, settings] of Object.entries(extraFields)) {
       if (!settings.enabled) continue;
       const value = req.body[fieldName];
-      if (settings.required && !value) {
-        return res.status(400).json({ success: false, message: `Missing required field: ${fieldName}` });
-      }
+      if (settings.required && !value) missing.push(fieldName);
       if (value !== undefined) customData.set(fieldName, value);
     }
+    if (missing.length) {
+      return res.status(400).json({ success: false, message: `Required: ${missing.join(", ")}` });
+    }
 
-    // Generate registration number
-    const regNo = await generateRegNo();
-
-    // Create student directly
-    const student = new Student({
-      regNo,
-      quizName: config.quizName,
-      customData: new Map(Object.entries(customData)),
+    const quizName = config.quizName || "Trivia Quiz";
+    const existing = await Student.findOne({
+      "customData.email": email,
+      "quizName": quizName
     });
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: "This email is already registered for the current quiz."
+      });
+    }
+
+    const regNo = await generateRegNo();
+    const student = new Student({ regNo, quizName, customData });
     await student.save();
 
-    // Rebuild registration CSV
-    await rebuildRegistrationCsv(config.quizName);
-
-    // ---------- PDF GENERATION (unchanged) ----------
-    const doc = new PDFDocument({ size: "A4", margin: 50 });
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename=reg-${regNo}.pdf`);
-    doc.pipe(res);
-
-    const bgPath = path.join(__dirname, "assets", "image.png");
-    if (fs.existsSync(bgPath)) {
-      doc.image(bgPath, 0, 0, { width: doc.page.width, height: doc.page.height });
-    } else {
-      doc.rect(0, 0, doc.page.width, doc.page.height).fill("#f8f9fa");
-    }
-
-    const pageWidth = doc.page.width;
-    const centerX = pageWidth / 2;
-
-    doc.fontSize(28)
-       .fillColor("#1a237e")
-       .font("Helvetica-Bold")
-       .text(config.quizName, centerX, 80, { align: "center" })
-       .moveDown(0.5);
-
-    doc.fontSize(18)
-       .fillColor("#303f9f")
-       .font("Helvetica")
-       .text("Registration Confirmation", centerX, 130, { align: "center" })
-       .moveDown(1);
-
-    const cardX = 80;
-    const cardY = 180;
-    const cardWidth = pageWidth - 160;
-    const cardHeight = 280;
-
-    doc.fillColor("#ffffff")
-       .fillOpacity(0.85)
-       .rect(cardX, cardY, cardWidth, cardHeight)
-       .fill()
-       .fillOpacity(1)
-       .strokeColor("#b0bec5")
-       .lineWidth(1)
-       .rect(cardX, cardY, cardWidth, cardHeight)
-       .stroke();
-
-    let yPos = cardY + 30;
-    const leftCol = cardX + 30;
-    const rightCol = cardX + 200;
-
-    const detailFontSize = 13;
-    const labelColor = "#455a64";
-    const valueColor = "#1e293b";
-
-    doc.fontSize(detailFontSize).font("Helvetica-Bold").fillColor(labelColor);
-    doc.text("Registration No:", leftCol, yPos);
-    doc.font("Helvetica").fillColor(valueColor);
-    doc.text(regNo, rightCol, yPos);
-    yPos += 30;
-
-    // Name
-    const nameVal = customData.get("name") || "";
-    doc.font("Helvetica-Bold").fillColor(labelColor);
-    doc.text("Name:", leftCol, yPos);
-    doc.font("Helvetica").fillColor(valueColor);
-    doc.text(nameVal, rightCol, yPos);
-    yPos += 30;
-
-    // Email
-    const emailVal = customData.get("email") || "";
-    doc.font("Helvetica-Bold").fillColor(labelColor);
-    doc.text("Email:", leftCol, yPos);
-    doc.font("Helvetica").fillColor(valueColor);
-    doc.text(emailVal, rightCol, yPos);
-    yPos += 30;
-
-    // Extra fields
-    for (const [fieldName, settings] of Object.entries(extraFieldsConfig)) {
-      if (!settings.enabled) continue;
-      const value = customData.get(fieldName) || "";
-      if (value) {
-        const label = fieldName.charAt(0).toUpperCase() + fieldName.slice(1);
-        doc.font("Helvetica-Bold").fillColor(labelColor);
-        doc.text(label + ":", leftCol, yPos);
-        doc.font("Helvetica").fillColor(valueColor);
-        doc.text(value, rightCol, yPos);
-        yPos += 30;
-      }
-    }
-
-    // Start time
-    const startIST = config.startTime.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-    doc.font("Helvetica-Bold").fillColor(labelColor);
-    doc.text("Quiz Date & Time (IST):", leftCol, yPos);
-    doc.font("Helvetica").fillColor(valueColor);
-    doc.text(startIST, rightCol, yPos);
-    yPos += 30;
-
-    // Login ID
-    doc.font("Helvetica-Bold").fillColor(labelColor);
-    doc.text("Login ID:", leftCol, yPos);
-    doc.font("Helvetica").fillColor(valueColor);
-    doc.text(regNo, rightCol, yPos);
-    yPos += 30;
-
-    // Password
-    doc.font("Helvetica-Bold").fillColor(labelColor);
-    doc.text("Password:", leftCol, yPos);
-    doc.font("Helvetica").fillColor(valueColor);
-    doc.text(emailVal, rightCol, yPos);
-    yPos += 30;
-
-    // Rules section
-    const noteY = cardY + cardHeight + 20;
-    doc.strokeColor("#b0bec5")
-       .lineWidth(1)
-       .moveTo(80, noteY - 5)
-       .lineTo(pageWidth - 80, noteY - 5)
-       .stroke();
-
-    const rulesY = noteY + 30;
-    doc.fontSize(16)
-       .fillColor("#1a237e")
-       .font("Helvetica-Bold")
-       .text("Important Rules", centerX, rulesY, { align: "center" })
-       .moveDown(0.5);
-
-    const ruleFontSize = 12;
-    const ruleColor = "#37474f";
-    const bulletX = 70;
-    let rulesYPos = rulesY + 40;
-
-    const rules = [
-      "Please login 5 minutes before the exam starts.",
-      "Do not press back or refresh the browser during the quiz.",
-      "The quiz will start exactly at the mentioned time.",
-      "You may navigate between questions freely.",
-      "Use the 'Clear Answer' button to deselect your choice.",
-      "Submit the quiz manually before the timer ends.",
-      "Failure to submit will result in disqualification.",
-      "Any malpractice leads to immediate disqualification."
-    ];
-
-    doc.fontSize(ruleFontSize)
-       .fillColor(ruleColor)
-       .font("Helvetica");
-
-    rules.forEach((rule, i) => {
-      const y = rulesYPos + i * 22;
-      doc.text(`• ${rule}`, bulletX, y, { width: pageWidth - 140 });
-    });
-
-    const footerY = doc.page.height - 40;
-    doc.fontSize(10)
-       .fillColor("#78909c")
-       .text("Generated by Trivia Quiz System", centerX, footerY, { align: "center" });
-
-    doc.end();
-
-  } catch (err) {
-    console.error("Registration error:", err);
-    res.status(500).json({ success: false, message: "Registration failed. Please try again." });
-  }
-});
-app.post("/verify-otp", async (req, res) => {
-  try {
-    const { email, otp } = req.body;
-    if (!email || !otp) {
-      return res.status(400).json({ success: false, message: "Email and OTP are required." });
-    }
-
-    const pending = otpStore[email];
-    if (!pending) {
-      return res.status(400).json({ success: false, message: "No pending registration found for this email." });
-    }
-
-    if (Date.now() > pending.expiresAt) {
-      delete otpStore[email];
-      return res.status(400).json({ success: false, message: "OTP has expired. Please register again." });
-    }
-
-    if (pending.otp !== otp) {
-      return res.status(400).json({ success: false, message: "Invalid OTP. Please try again." });
-    }
-
-    // OTP verified – create the student
-    const { quizName, customData } = pending.registrationData;
-    const regNo = await generateRegNo();
-
-    const student = new Student({
-      regNo,
-      quizName,
-      customData: new Map(Object.entries(customData)),
-    });
-    await student.save();
-
-    // Rebuild registration CSV
     await rebuildRegistrationCsv(quizName);
 
-    // Clear the OTP entry
-    delete otpStore[email];
-
-    // ---------- PDF GENERATION ----------
+    // ---------- PDF GENERATION (unchanged) ----------
     const doc = new PDFDocument({ size: "A4", margin: 50 });
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename=reg-${regNo}.pdf`);
@@ -1412,27 +1215,21 @@ app.post("/verify-otp", async (req, res) => {
     doc.text(regNo, rightCol, yPos);
     yPos += 30;
 
-    // Name
-    const name = customData.name || "";
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Name:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
     doc.text(name, rightCol, yPos);
     yPos += 30;
 
-    // Email
-    const emailVal = customData.email || "";
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Email:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
-    doc.text(emailVal, rightCol, yPos);
+    doc.text(email, rightCol, yPos);
     yPos += 30;
 
-    // Extra fields
-    const extraFieldsConfig = await getExamConfig().registrationFields ? Object.fromEntries((await getExamConfig()).registrationFields) : {};
-    for (const [fieldName, settings] of Object.entries(extraFieldsConfig)) {
+    for (const [fieldName, settings] of Object.entries(extraFields)) {
       if (!settings.enabled) continue;
-      const value = customData[fieldName] || "";
+      const value = customData.get(fieldName) || "";
       if (value) {
         const label = fieldName.charAt(0).toUpperCase() + fieldName.slice(1);
         doc.font("Helvetica-Bold").fillColor(labelColor);
@@ -1443,8 +1240,6 @@ app.post("/verify-otp", async (req, res) => {
       }
     }
 
-    // Start time
-    const config = await getExamConfig();
     const startIST = config.startTime.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Quiz Date & Time (IST):", leftCol, yPos);
@@ -1452,21 +1247,18 @@ app.post("/verify-otp", async (req, res) => {
     doc.text(startIST, rightCol, yPos);
     yPos += 30;
 
-    // Login ID
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Login ID:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
     doc.text(regNo, rightCol, yPos);
     yPos += 30;
 
-    // Password
     doc.font("Helvetica-Bold").fillColor(labelColor);
     doc.text("Password:", leftCol, yPos);
     doc.font("Helvetica").fillColor(valueColor);
-    doc.text(emailVal, rightCol, yPos);
+    doc.text(email, rightCol, yPos);
     yPos += 30;
 
-    // Rules section (unchanged)
     const noteY = cardY + cardHeight + 20;
     doc.strokeColor("#b0bec5")
        .lineWidth(1)
@@ -1514,10 +1306,11 @@ app.post("/verify-otp", async (req, res) => {
     doc.end();
 
   } catch (err) {
-    console.error("OTP verification error:", err);
-    res.status(500).json({ success: false, message: "Verification failed. Please try again." });
+    console.error("Registration error:", err);
+    res.status(500).json({ success: false, message: "Registration failed" });
   }
 });
+ 
 
 app.get("/questions-csv", async (req, res) => {
   try {
