@@ -655,18 +655,50 @@ async function disqualifyOverdueAttempts(quizName, quizEndTime) {
   return count;
 }
 
-async function autoArchiveQuiz(quizName) {
+ async function autoArchiveQuiz(quizName) {
+  // ------------------------------------------------------------
+  // 1️⃣ FETCH ALL SUBMITTED ATTEMPTS FOR THIS QUIZ
+  // ------------------------------------------------------------
   const attempts = await QuizAttempt.find({ submitted: true, quizName }).lean();
-  if (attempts.length === 0) return 0;
+  if (attempts.length === 0) {
+    console.log(`ℹ️ No submitted attempts to archive for "${quizName}"`);
+    return 0;
+  }
 
+  // ------------------------------------------------------------
+  // 2️⃣ PRESERVE THE CURRENT RESULTS CSV (BEFORE CLEARING)
+  // ------------------------------------------------------------
+  const csvPath = getCsvPath(quizName);
+  if (fs.existsSync(csvPath)) {
+    const sanitized = quizName.replace(/[^a-zA-Z0-9-_]/g, "_");
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const archivedCsvPath = path.join(
+      resultsDir,
+      `archived_results_${sanitized}_${timestamp}.csv`
+    );
+    fs.copyFileSync(csvPath, archivedCsvPath);
+    console.log(`📄 Preserved results CSV → ${archivedCsvPath}`);
+  } else {
+    console.log(`⚠️ No results CSV found to preserve for "${quizName}"`);
+  }
+
+  // ------------------------------------------------------------
+  // 3️⃣ FETCH STUDENT DETAILS (NAME, EMAIL) FOR THE ARCHIVE
+  // ------------------------------------------------------------
   const regNos = attempts.map(a => a.studentRegNo);
   const students = await Student.find({ regNo: { $in: regNos } }).lean();
   const studentMap = {};
   students.forEach(s => {
     const custom = getCustomDataObject(s.customData);
-    studentMap[s.regNo] = { name: custom.name || "", email: custom.email || "" };
+    studentMap[s.regNo] = {
+      name: custom.name || "",
+      email: custom.email || ""
+    };
   });
 
+  // ------------------------------------------------------------
+  // 4️⃣ CREATE ARCHIVED DOCUMENTS
+  // ------------------------------------------------------------
   const archivedDocs = attempts.map(a => ({
     ...a,
     studentName: studentMap[a.studentRegNo]?.name || "",
@@ -674,13 +706,24 @@ async function autoArchiveQuiz(quizName) {
     archivedAt: new Date(),
   }));
 
+  // ------------------------------------------------------------
+  // 5️⃣ SAVE TO ARCHIVED COLLECTION & DELETE FROM ACTIVE
+  // ------------------------------------------------------------
   await ArchivedQuizAttempt.insertMany(archivedDocs);
   await QuizAttempt.deleteMany({ quizName });
   console.log(`🗄️ Auto‑archived ${archivedDocs.length} attempts for "${quizName}"`);
 
-  // Rebuild registration CSV (students remain) and results CSV (will be empty)
+  // ------------------------------------------------------------
+  // 6️⃣ REBUILD REGISTRATION CSV (STUDENTS REMAIN UNCHANGED)
+  // ------------------------------------------------------------
   await rebuildRegistrationCsv(quizName);
+
+  // ------------------------------------------------------------
+  // 7️⃣ REBUILD RESULTS CSV – NOW EMPTY (HEADERS ONLY)
+  //     This gives a fresh file for the next quiz.
+  // ------------------------------------------------------------
   await rebuildCsv(quizName);
+
   return archivedDocs.length;
 }
 
