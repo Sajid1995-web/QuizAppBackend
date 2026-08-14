@@ -313,7 +313,8 @@ async function rebuildCsv(quizName) {
         totalTimeMinutes: a.totalTimeMinutes || 0,
         rank: a.disqualified ? -1 : null, // we'll compute later
         timeOfSubmission: a.endTime?.toISOString() || "",
-        disqualified: a.disqualified ? "YES" : "NO",
+       disqualified: a.disqualified ? (a.totalTimeMinutes === 0 ? "NA" : "YES") : "NO",
+        //disqualified: a.disqualified ? "YES" : "NO",
         // keep original object id for sorting tie‑breaker if needed
         _id: a._id,
         endTime: a.endTime,
