@@ -322,7 +322,7 @@ async function rebuildCsv(quizName) {
     });
 
     // Separate disqualified and non‑disqualified
-    const disqualifiedRecords = records.filter(r => r.disqualified === "YES");
+    const disqualifiedRecords = records.filter(r => r.disqualified === "YES" || r.disqualified === "NA");
     const activeRecords = records.filter(r => r.disqualified === "NO");
 
     // Sort active by marks desc, time asc, then endTime asc (tie‑breaker)
@@ -2228,7 +2228,7 @@ app.get("/admin/archived-csv/:quizName", async (req, res) => {
     });
 
     // Separate disqualified
-    const disqualifiedRecords = records.filter(r => r.disqualified === "YES");
+    const disqualifiedRecords = records.filter(r => r.disqualified === "YES" || r.disqualified === "NA");
     const activeRecords = records.filter(r => r.disqualified === "NO");
 
     // Sort active by marks desc, time asc, endTime asc (tie‑breaker)
