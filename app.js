@@ -287,8 +287,7 @@ async function rebuildCsv(quizName) {
     });
 
     const allQuestions = await Question.find({ published: true, quizName }).sort({ createdAt: 1 }).lean();
-
-    // Build initial records (without rank)
+   
     // Build initial records (without rank)
     const records = attempts.map((a) => {
       const custom = studentMap[a.studentRegNo] || {};
@@ -2200,22 +2199,33 @@ app.get("/admin/archived-csv/:quizName", async (req, res) => {
       return res.status(404).json({ success: false, message: "No archived attempts for this quiz." });
     }
 
-    // Build records without rank
-    const records = attempts.map(a => ({
-      regNo: a.studentRegNo,
-      name: a.studentName || "",
-      email: a.studentEmail || "",
-      correctCount: a.score || 0,
-      wrongCount: (a.answers || []).filter((ans, idx) => ans !== null && ans !== "?").length - (a.score || 0),
-      totalMarksObtained: a.totalMarksObtained || 0,
-      totalMarks: a.totalMarks || 0,
-      totalTimeMinutes: a.totalTimeMinutes || 0,
-      rank: null,
-      submissionTime: a.endTime ? a.endTime.toISOString() : "",
-      disqualified: a.disqualified ? (a.totalTimeMinutes === 0 ? "NA" : "YES") : "NO",
-      //disqualified: a.disqualified ? "YES" : "NO",
-      endTime: a.endTime,
-    }));
+   // Build records without rank
+    const records = attempts.map(a => {
+      
+      // Clean up math for disqualified/no-shows
+      const actualCorrect = a.score === -1 ? 0 : (a.score || 0);
+      const attemptedCount = (a.answers || []).filter(ans => ans !== null && ans !== "" && ans !== "?").length;
+      let calculatedWrong = attemptedCount - actualCorrect;
+      if (a.score === -1 && attemptedCount === 0) calculatedWrong = 0;
+
+      return {
+        regNo: a.studentRegNo,
+        name: a.studentName || "",
+        email: a.studentEmail || "",
+        correctCount: actualCorrect,
+        wrongCount: calculatedWrong,
+        totalMarksObtained: a.totalMarksObtained === -1 ? 0 : (a.totalMarksObtained || 0),
+        totalMarks: a.totalMarks || 0,
+        totalTimeMinutes: a.totalTimeMinutes || 0,
+        rank: null,
+        submissionTime: a.endTime ? a.endTime.toISOString() : "",
+        
+        // THIS IS THE FIX: If disqualified and time is 0, they never logged in -> NA
+        disqualified: a.disqualified ? (a.totalTimeMinutes === 0 ? "NA" : "YES") : "NO",
+        
+        endTime: a.endTime,
+      };
+    });
 
     // Separate disqualified
     const disqualifiedRecords = records.filter(r => r.disqualified === "YES");
