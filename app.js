@@ -2211,7 +2211,8 @@ app.get("/admin/archived-csv/:quizName", async (req, res) => {
       totalTimeMinutes: a.totalTimeMinutes || 0,
       rank: null,
       submissionTime: a.endTime ? a.endTime.toISOString() : "",
-      disqualified: a.disqualified ? "YES" : "NO",
+      disqualified: a.disqualified ? (a.totalTimeMinutes === 0 ? "NA" : "YES") : "NO",
+      //disqualified: a.disqualified ? "YES" : "NO",
       endTime: a.endTime,
     }));
 
