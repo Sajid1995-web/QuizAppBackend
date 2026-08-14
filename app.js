@@ -289,32 +289,33 @@ async function rebuildCsv(quizName) {
     const allQuestions = await Question.find({ published: true, quizName }).sort({ createdAt: 1 }).lean();
 
     // Build initial records (without rank)
+    // Build initial records (without rank)
     const records = attempts.map((a) => {
       const custom = studentMap[a.studentRegNo] || {};
       const name = custom.name || "";
       const email = custom.email || "";
-      const correct = a.score || 0;
-      let wrong = 0;
-      if (a.answers && allQuestions.length > 0) {
-        a.answers.forEach((ans, idx) => {
-          if (idx < allQuestions.length && ans !== null && ans !== "" && ans !== allQuestions[idx].correctAnswer) {
-            wrong++;
-          }
-        });
-      }
+
+      // Clean up math for disqualified/no-shows
+      const actualCorrect = a.score === -1 ? 0 : (a.score || 0);
+      const attemptedCount = (a.answers || []).filter(ans => ans !== null && ans !== "" && ans !== "?").length;
+      let calculatedWrong = attemptedCount - actualCorrect;
+      if (a.score === -1 && attemptedCount === 0) calculatedWrong = 0;
+
       return {
         regNo: a.studentRegNo,
         name,
         email,
-        correctCount: correct,
-        wrongCount: wrong,
-        totalMarksObtained: a.totalMarksObtained || 0,
+        correctCount: actualCorrect,
+        wrongCount: calculatedWrong,
+        totalMarksObtained: a.totalMarksObtained === -1 ? 0 : (a.totalMarksObtained || 0),
         totalMarks: a.totalMarks || 0,
         totalTimeMinutes: a.totalTimeMinutes || 0,
         rank: a.disqualified ? -1 : null, // we'll compute later
         timeOfSubmission: a.endTime?.toISOString() || "",
+        
+        // THIS IS THE FIX: If disqualified and time is 0, they never logged in -> NA
         disqualified: a.disqualified ? (a.totalTimeMinutes === 0 ? "NA" : "YES") : "NO",
-        //disqualified: a.disqualified ? "YES" : "NO",
+        
         // keep original object id for sorting tie‑breaker if needed
         _id: a._id,
         endTime: a.endTime,
