@@ -771,7 +771,7 @@ async function disqualifyOverdueAttempts(quizName, quizEndTime) {
   return archivedDocs.length;
 }
 
- async function finalizeRanks() {
+async function finalizeRanks() {
   try {
     console.log("⏳ Finalising ranks...");
 
@@ -782,16 +782,20 @@ async function disqualifyOverdueAttempts(quizName, quizEndTime) {
       config.startTime.getTime() +
       config.durationMinutes * 60000
     );
+    
+    // NEW: Get current server time
+    const now = new Date();
 
     // ------------------------------------------------------------
-    // IMPORTANT:
-    // Disqualify students who did not submit before the exam ended.
+    // 🚨 CRITICAL FIX: Only disqualify students IF the global exam 
+    // time has actually ended. Do NOT run this while the exam is live.
     // ------------------------------------------------------------
-    await disqualifyOverdueAttempts(
-      quizName,
-      quizEnd
-    );
-    await disqualifyNoShows(quizName, quizEnd);
+    if (now >= quizEnd) {
+      await disqualifyOverdueAttempts(quizName, quizEnd);
+      await disqualifyNoShows(quizName, quizEnd);
+    } else {
+      console.log("ℹ️ Exam still running. Skipping mass disqualification.");
+    }
 
     // ------------------------------------------------------------
     // Fetch all submitted, non-disqualified attempts
@@ -814,90 +818,44 @@ async function disqualifyOverdueAttempts(quizName, quizEndTime) {
         )
         .sort((a, b) => {
           // Higher marks first
-          if (
-            b.totalMarksObtained !==
-            a.totalMarksObtained
-          ) {
-            return (
-              b.totalMarksObtained -
-              a.totalMarksObtained
-            );
+          if (b.totalMarksObtained !== a.totalMarksObtained) {
+            return b.totalMarksObtained - a.totalMarksObtained;
           }
 
           // Lower completion time first
-          if (
-            a.totalTimeMinutes !==
-            b.totalTimeMinutes
-          ) {
-            return (
-              a.totalTimeMinutes -
-              b.totalTimeMinutes
-            );
+          if (a.totalTimeMinutes !== b.totalTimeMinutes) {
+            return a.totalTimeMinutes - b.totalTimeMinutes;
           }
 
           // Earlier submission first
-          return (
-            (a.endTime?.getTime() || 0) -
-            (b.endTime?.getTime() || 0)
-          );
+          return (a.endTime?.getTime() || 0) - (b.endTime?.getTime() || 0);
         });
 
       let currentRank = 1;
 
-      for (
-        let i = 0;
-        i < sorted.length;
-        i++
-      ) {
+      for (let i = 0; i < sorted.length; i++) {
         const current = sorted[i];
 
-        // --------------------------------------------------------
         // Same marks + same time + same submission time = tie
-        // --------------------------------------------------------
         if (i > 0) {
           const previous = sorted[i - 1];
 
-          const sameMarks =
-            current.totalMarksObtained ===
-            previous.totalMarksObtained;
+          const sameMarks = current.totalMarksObtained === previous.totalMarksObtained;
+          const sameTime = current.totalTimeMinutes === previous.totalTimeMinutes;
+          const sameEndTime = current.endTime?.getTime() === previous.endTime?.getTime();
 
-          const sameTime =
-            current.totalTimeMinutes ===
-            previous.totalTimeMinutes;
-
-          const sameEndTime =
-            current.endTime?.getTime() ===
-            previous.endTime?.getTime();
-
-          if (
-            sameMarks &&
-            sameTime &&
-            sameEndTime
-          ) {
+          if (sameMarks && sameTime && sameEndTime) {
             await QuizAttempt.updateOne(
-              {
-                _id: current._id,
-              },
-              {
-                $set: {
-                  rank: previous.rank,
-                },
-              }
+              { _id: current._id },
+              { $set: { rank: previous.rank } }
             );
-
             continue;
           }
         }
 
         await QuizAttempt.updateOne(
-          {
-            _id: current._id,
-          },
-          {
-            $set: {
-              rank: currentRank,
-            },
-          }
+          { _id: current._id },
+          { $set: { rank: currentRank } }
         );
 
         currentRank++;
@@ -914,55 +872,26 @@ async function disqualifyOverdueAttempts(quizName, quizEndTime) {
         quizName,
       },
       {
-        $set: {
-          rank: -1,
-        },
+        $set: { rank: -1 },
       }
     );
 
-    // ------------------------------------------------------------
     // Rebuild results CSV
-    // ------------------------------------------------------------
     await rebuildCsv(quizName);
 
-    // ------------------------------------------------------------
-    // Mark ranks as finalized
-    //
-    // IMPORTANT:
-    // DO NOT ARCHIVE HERE.
-    //
-    // finalizeRanks() only calculates/finalizes ranks.
-    // ------------------------------------------------------------
-    await ExamConfig.updateOne(
-      {},
-      {
-        $set: {
-          ranksFinalised: true,
-        },
-      }
-    );
-
-    console.log(
-      `✅ Ranks finalised for "${quizName}".`
-    );
-
-    // ------------------------------------------------------------
-    // IMPORTANT:
-    // There is intentionally NO:
-    //
-    // autoArchiveQuiz()
-    //
-    // here.
-    //
-    // Active QuizAttempt records must remain available until
-    // the quiz lifecycle is actually finished.
-    // ------------------------------------------------------------
+    // Mark ranks as finalized ONLY if the exam is actually over
+    if (now >= quizEnd) {
+        await ExamConfig.updateOne(
+        {},
+        { $set: { ranksFinalised: true } }
+        );
+        console.log(`✅ Ranks finalised for "${quizName}".`);
+    } else {
+        console.log(`✅ Live leaderboard updated for "${quizName}".`);
+    }
 
   } catch (err) {
-    console.error(
-      "❌ Finalisation error:",
-      err
-    );
+    console.error("❌ Finalisation error:", err);
   }
 }
 
