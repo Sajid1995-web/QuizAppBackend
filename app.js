@@ -1088,152 +1088,173 @@ app.get("/registration-config", async (req, res) => {
 
     await rebuildRegistrationCsv(quizName);
 
-    // ---------- PDF GENERATION (unchanged) ----------
-    const doc = new PDFDocument({ size: "A4", margin: 50 });
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename=reg-${regNo}.pdf`);
-    doc.pipe(res);
+     // ---------- PDF GENERATION (dynamic layout) ----------
+const doc = new PDFDocument({ size: "A4", margin: 50 });
+res.setHeader("Content-Type", "application/pdf");
+res.setHeader("Content-Disposition", `attachment; filename=reg-${regNo}.pdf`);
+doc.pipe(res);
 
-    const bgPath = path.join(__dirname, "assets", "image.png");
-    if (fs.existsSync(bgPath)) {
-      doc.image(bgPath, 0, 0, { width: doc.page.width, height: doc.page.height });
-    } else {
-      doc.rect(0, 0, doc.page.width, doc.page.height).fill("#f8f9fa");
-    }
+// Background image (if exists)
+const bgPath = path.join(__dirname, "assets", "image.png");
+if (fs.existsSync(bgPath)) {
+  doc.image(bgPath, 0, 0, { width: doc.page.width, height: doc.page.height });
+} else {
+  doc.rect(0, 0, doc.page.width, doc.page.height).fill("#f8f9fa");
+}
 
-    const pageWidth = doc.page.width;
-    const centerX = pageWidth / 2;
+const pageWidth = doc.page.width;
+const centerX = pageWidth / 2;
 
-    doc.fontSize(28)
-       .fillColor("#1a237e")
-       .font("Helvetica-Bold")
-       .text(quizName, centerX, 80, { align: "center" })
-       .moveDown(0.5);
+// --- Title ---
+doc.fontSize(28)
+   .fillColor("#1a237e")
+   .font("Helvetica-Bold")
+   .text(quizName, centerX, 80, { align: "center" })
+   .moveDown(0.5);
 
-    doc.fontSize(18)
-       .fillColor("#303f9f")
-       .font("Helvetica")
-       .text("Registration Confirmation", centerX, 130, { align: "center" })
-       .moveDown(1);
+doc.fontSize(18)
+   .fillColor("#303f9f")
+   .font("Helvetica")
+   .text("Registration Confirmation", centerX, 130, { align: "center" })
+   .moveDown(1);
 
-    const cardX = 80;
-    const cardY = 180;
-    const cardWidth = pageWidth - 160;
-    const cardHeight = 280;
+// --- Build the list of field label/value pairs ---
+const fields = [];
 
-    doc.fillColor("#ffffff")
-       .fillOpacity(0.85)
-       .rect(cardX, cardY, cardWidth, cardHeight)
-       .fill()
-       .fillOpacity(1)
-       .strokeColor("#b0bec5")
-       .lineWidth(1)
-       .rect(cardX, cardY, cardWidth, cardHeight)
-       .stroke();
+// Registration No
+fields.push({ label: "Registration No:", value: regNo });
+// Name
+fields.push({ label: "Name:", value: name });
+// Email
+fields.push({ label: "Email:", value: email });
 
-    let yPos = cardY + 30;
-    const leftCol = cardX + 30;
-    const rightCol = cardX + 200;
+// Custom extra fields (enabled)
+for (const [fieldName, settings] of Object.entries(extraFields)) {
+  if (!settings.enabled) continue;
+  const value = customData.get(fieldName) || "";
+  if (value) {
+    const label = fieldName.charAt(0).toUpperCase() + fieldName.slice(1) + ":";
+    fields.push({ label, value });
+  }
+}
 
-    const detailFontSize = 13;
-    const labelColor = "#455a64";
-    const valueColor = "#1e293b";
+// Quiz date/time
+const startIST = config.startTime.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+fields.push({ label: "Quiz Date & Time (IST):", value: startIST });
+// Login ID
+fields.push({ label: "Login ID:", value: regNo });
+// Password
+fields.push({ label: "Password:", value: email });
 
-    doc.fontSize(detailFontSize).font("Helvetica-Bold").fillColor(labelColor);
-    doc.text("Registration No:", leftCol, yPos);
-    doc.font("Helvetica").fillColor(valueColor);
-    doc.text(regNo, rightCol, yPos);
-    yPos += 30;
+// --- Determine optimal font size and line height based on number of fields ---
+const fieldCount = fields.length;
+let fontSize, lineHeight, cardPadding;
+if (fieldCount <= 6) {
+  fontSize = 13;
+  lineHeight = 30;
+  cardPadding = 30;
+} else if (fieldCount <= 10) {
+  fontSize = 12;
+  lineHeight = 26;
+  cardPadding = 25;
+} else if (fieldCount <= 14) {
+  fontSize = 11;
+  lineHeight = 22;
+  cardPadding = 20;
+} else {
+  fontSize = 10;
+  lineHeight = 20;
+  cardPadding = 18;
+}
 
-    doc.font("Helvetica-Bold").fillColor(labelColor);
-    doc.text("Name:", leftCol, yPos);
-    doc.font("Helvetica").fillColor(valueColor);
-    doc.text(name, rightCol, yPos);
-    yPos += 30;
+// Calculate required height for the fields block
+const fieldBlockHeight = fieldCount * lineHeight;
+const cardY = 180;
+const cardX = 80;
+const cardWidth = pageWidth - 160;
 
-    doc.font("Helvetica-Bold").fillColor(labelColor);
-    doc.text("Email:", leftCol, yPos);
-    doc.font("Helvetica").fillColor(valueColor);
-    doc.text(email, rightCol, yPos);
-    yPos += 30;
+// We want to leave room for the rules (at least ~200px) and a note line.
+// The page height is ~842 (A4). So max card height = 842 - cardY - 200 = ~462.
+const maxCardHeight = doc.page.height - cardY - 200;
+let cardHeight = Math.min(Math.max(280, fieldBlockHeight + cardPadding * 2), maxCardHeight);
 
-    for (const [fieldName, settings] of Object.entries(extraFields)) {
-      if (!settings.enabled) continue;
-      const value = customData.get(fieldName) || "";
-      if (value) {
-        const label = fieldName.charAt(0).toUpperCase() + fieldName.slice(1);
-        doc.font("Helvetica-Bold").fillColor(labelColor);
-        doc.text(label + ":", leftCol, yPos);
-        doc.font("Helvetica").fillColor(valueColor);
-        doc.text(value, rightCol, yPos);
-        yPos += 30;
-      }
-    }
+// If even with minimal font it still overflows, we reduce cardPadding and maybe shrink rules further.
+// But we'll keep it simple.
 
-    const startIST = config.startTime.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-    doc.font("Helvetica-Bold").fillColor(labelColor);
-    doc.text("Quiz Date & Time (IST):", leftCol, yPos);
-    doc.font("Helvetica").fillColor(valueColor);
-    doc.text(startIST, rightCol, yPos);
-    yPos += 30;
+// --- Draw the card background ---
+doc.fillColor("#ffffff")
+   .fillOpacity(0.85)
+   .rect(cardX, cardY, cardWidth, cardHeight)
+   .fill()
+   .fillOpacity(1)
+   .strokeColor("#b0bec5")
+   .lineWidth(1)
+   .rect(cardX, cardY, cardWidth, cardHeight)
+   .stroke();
 
-    doc.font("Helvetica-Bold").fillColor(labelColor);
-    doc.text("Login ID:", leftCol, yPos);
-    doc.font("Helvetica").fillColor(valueColor);
-    doc.text(regNo, rightCol, yPos);
-    yPos += 30;
+// --- Render fields inside the card ---
+let yPos = cardY + cardPadding;
+const leftCol = cardX + 30;
+const rightCol = cardX + 200;
 
-    doc.font("Helvetica-Bold").fillColor(labelColor);
-    doc.text("Password:", leftCol, yPos);
-    doc.font("Helvetica").fillColor(valueColor);
-    doc.text(email, rightCol, yPos);
-    yPos += 30;
+doc.fontSize(fontSize);
+fields.forEach((field) => {
+  // Label
+  doc.font("Helvetica-Bold").fillColor("#455a64");
+  doc.text(field.label, leftCol, yPos);
+  // Value
+  doc.font("Helvetica").fillColor("#1e293b");
+  doc.text(field.value, rightCol, yPos);
+  yPos += lineHeight;
+});
 
-    const noteY = cardY + cardHeight + 20;
-    doc.strokeColor("#b0bec5")
-       .lineWidth(1)
-       .moveTo(80, noteY - 5)
-       .lineTo(pageWidth - 80, noteY - 5)
-       .stroke();
+// --- Separator line and rules ---
+const noteY = cardY + cardHeight + 20;
+doc.strokeColor("#b0bec5")
+   .lineWidth(1)
+   .moveTo(80, noteY - 5)
+   .lineTo(pageWidth - 80, noteY - 5)
+   .stroke();
 
-    const rulesY = noteY + 30;
-    doc.fontSize(16)
-       .fillColor("#1a237e")
-       .font("Helvetica-Bold")
-       .text("Important Rules", centerX, rulesY, { align: "center" })
-       .moveDown(0.5);
+const rulesY = noteY + 30;
+doc.fontSize(16)
+   .fillColor("#1a237e")
+   .font("Helvetica-Bold")
+   .text("Important Rules", centerX, rulesY, { align: "center" })
+   .moveDown(0.5);
 
-    const ruleFontSize = 12;
-    const ruleColor = "#37474f";
-    const bulletX = 70;
-    let rulesYPos = rulesY + 40;
+const ruleFontSize = Math.max(10, 12 - Math.floor(fieldCount / 10)); // shrink if many fields
+const ruleColor = "#37474f";
+const bulletX = 70;
+let rulesYPos = rulesY + 40;
 
-    const rules = [
-      "Please login 5 minutes before the exam starts.",
-      "Do not press back or refresh the browser during the quiz.",
-      "The quiz will start exactly at the mentioned time.",
-      "You may navigate between questions freely.",
-      "Use the 'Clear Answer' button to deselect your choice.",
-      "Submit the quiz manually before the timer ends.",
-      "Failure to submit will result in disqualification.",
-      "Any malpractice leads to immediate disqualification."
-    ];
+const rules = [
+  "Please login 5 minutes before the exam starts.",
+  "Do not press back or refresh the browser during the quiz.",
+  "The quiz will start exactly at the mentioned time.",
+  "You may navigate between questions freely.",
+  "Use the 'Clear Answer' button to deselect your choice.",
+  "Submit the quiz manually before the timer ends.",
+  "Failure to submit will result in disqualification.",
+  "Any malpractice leads to immediate disqualification."
+];
 
-    doc.fontSize(ruleFontSize)
-       .fillColor(ruleColor)
-       .font("Helvetica");
+doc.fontSize(ruleFontSize)
+   .fillColor(ruleColor)
+   .font("Helvetica");
 
-    rules.forEach((rule, i) => {
-      const y = rulesYPos + i * 22;
-      doc.text(`• ${rule}`, bulletX, y, { width: pageWidth - 140 });
-    });
+rules.forEach((rule) => {
+  doc.text(`• ${rule}`, bulletX, rulesYPos, { width: pageWidth - 140 });
+  rulesYPos += ruleFontSize * 1.6;
+});
 
-    const footerY = doc.page.height - 40;
-    doc.fontSize(10)
-       .fillColor("#78909c")
-       .text("Generated by Trivia Quiz System", centerX, footerY, { align: "center" });
+// --- Footer ---
+const footerY = doc.page.height - 40;
+doc.fontSize(10)
+   .fillColor("#78909c")
+   .text("Generated by Trivia Quiz System", centerX, footerY, { align: "center" });
 
-    doc.end();
+doc.end();
 
   } catch (err) {
     console.error("Registration error:", err);
