@@ -1088,32 +1088,7 @@ app.get("/registration-config", async (req, res) => {
 
     await rebuildRegistrationCsv(quizName);
 
-     // ---------- PDF GENERATION (dynamic layout) ----------
-// ... after saving student and rebuilding CSV
-
-// ---------- Build fields array ----------
-const fields = [];
-fields.push({ label: "Registration No:", value: regNo });
-fields.push({ label: "Name:", value: name });
-fields.push({ label: "Email:", value: email });
-
-for (const [fieldName, settings] of Object.entries(extraFields)) {
-  if (!settings.enabled) continue;
-  const value = customData.get(fieldName) || "";
-  if (value) {
-    const label = fieldName.charAt(0).toUpperCase() + fieldName.slice(1) + ":";
-    fields.push({ label, value });
-  }
-}
-
-const startIST = config.startTime.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-fields.push({ label: "Quiz Date & Time (IST):", value: startIST });
-fields.push({ label: "Login ID:", value: regNo });
-fields.push({ label: "Password:", value: email });
-
-const fieldCount = fields.length;
-
-// ---------- PDF GENERATION (single‑page, no footer, left‑aligned rules) ----------
+      // ---------- PDF GENERATION (single‑page, no footer, left‑aligned rules) ----------
 
 // Build fields array first
 const fields = [];
