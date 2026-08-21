@@ -1088,7 +1088,7 @@ app.get("/registration-config", async (req, res) => {
 
     await rebuildRegistrationCsv(quizName);
 
-      // ---------- PDF GENERATION (single‑page, no footer, left‑aligned rules) ----------
+       // ---------- PDF GENERATION (single‑page, no footer, title right, rules left) ----------
 
 // Build fields array first
 const fields = [];
@@ -1128,9 +1128,10 @@ if (fs.existsSync(bgPath)) {
 
 const pageWidth = doc.page.width;
 const pageHeight = doc.page.height;
-const leftMargin = 80; // consistent left margin for text blocks
+const leftMargin = 80;
+const rightEdge = pageWidth - leftMargin;
 
-// --- Title ---
+// --- Title – RIGHT ALIGNED ---
 let titleSize = 28;
 let subTitleSize = 18;
 if (fieldCount > 10) {
@@ -1144,12 +1145,12 @@ if (fieldCount > 10) {
 doc.fontSize(titleSize)
    .fillColor("#1a237e")
    .font("Helvetica-Bold")
-   .text(quizName, leftMargin, 70, { align: "left" }); // left aligned
+   .text(quizName, rightEdge, 70, { align: "right" });
 
 doc.fontSize(subTitleSize)
    .fillColor("#303f9f")
    .font("Helvetica")
-   .text("Registration Confirmation", leftMargin, 110, { align: "left" });
+   .text("Registration Confirmation", rightEdge, 110, { align: "right" });
 
 // --- Dynamic field sizing ---
 let fontSize, lineHeight, cardPadding;
@@ -1171,7 +1172,7 @@ if (fieldCount <= 6) {
   cardPadding = 18;
 }
 
-// Card dimensions
+// Card dimensions – left‑aligned
 const fieldBlockHeight = fieldCount * lineHeight;
 const cardY = 160;
 const cardX = leftMargin;
@@ -1186,7 +1187,7 @@ doc.fillColor("#ffffff")
    .fill()
    .fillOpacity(1);
 
-// --- Render fields inside card ---
+// --- Render fields inside card (left‑aligned) ---
 let yPos = cardY + cardPadding;
 const labelX = cardX + 30;
 const valueX = cardX + 180;
@@ -1200,7 +1201,7 @@ fields.forEach((field) => {
   yPos += lineHeight;
 });
 
-// --- Separator line above rules (left aligned) ---
+// --- Separator line (full width, left‑aligned) ---
 const noteY = cardY + cardHeight + 15;
 doc.strokeColor("#b0bec5")
    .lineWidth(1)
@@ -1222,7 +1223,7 @@ let ruleFontSize = Math.min(11, Math.max(8, Math.floor(remainingHeight / (ruleCo
 if (ruleFontSize < 8) ruleFontSize = 8;
 
 const ruleColor = "#37474f";
-const bulletX = leftMargin; // align bullets with the title
+const bulletX = leftMargin;
 let rulesYPos = rulesY + 28;
 
 const rules = [
