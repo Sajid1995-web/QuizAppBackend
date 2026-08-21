@@ -1089,46 +1089,14 @@ app.get("/registration-config", async (req, res) => {
     await rebuildRegistrationCsv(quizName);
 
      // ---------- PDF GENERATION (dynamic layout) ----------
-const doc = new PDFDocument({ size: "A4", margin: 50 });
-res.setHeader("Content-Type", "application/pdf");
-res.setHeader("Content-Disposition", `attachment; filename=reg-${regNo}.pdf`);
-doc.pipe(res);
+// ... after saving student and rebuilding CSV
 
-// Background image (if exists)
-const bgPath = path.join(__dirname, "assets", "image.png");
-if (fs.existsSync(bgPath)) {
-  doc.image(bgPath, 0, 0, { width: doc.page.width, height: doc.page.height });
-} else {
-  doc.rect(0, 0, doc.page.width, doc.page.height).fill("#f8f9fa");
-}
-
-const pageWidth = doc.page.width;
-const centerX = pageWidth / 2;
-
-// --- Title ---
-doc.fontSize(28)
-   .fillColor("#1a237e")
-   .font("Helvetica-Bold")
-   .text(quizName, centerX, 80, { align: "center" })
-   .moveDown(0.5);
-
-doc.fontSize(18)
-   .fillColor("#303f9f")
-   .font("Helvetica")
-   .text("Registration Confirmation", centerX, 130, { align: "center" })
-   .moveDown(1);
-
-// --- Build the list of field label/value pairs ---
+// ---------- Build fields array ----------
 const fields = [];
-
-// Registration No
 fields.push({ label: "Registration No:", value: regNo });
-// Name
 fields.push({ label: "Name:", value: name });
-// Email
 fields.push({ label: "Email:", value: email });
 
-// Custom extra fields (enabled)
 for (const [fieldName, settings] of Object.entries(extraFields)) {
   if (!settings.enabled) continue;
   const value = customData.get(fieldName) || "";
@@ -1138,16 +1106,53 @@ for (const [fieldName, settings] of Object.entries(extraFields)) {
   }
 }
 
-// Quiz date/time
 const startIST = config.startTime.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 fields.push({ label: "Quiz Date & Time (IST):", value: startIST });
-// Login ID
 fields.push({ label: "Login ID:", value: regNo });
-// Password
 fields.push({ label: "Password:", value: email });
 
-// --- Determine optimal font size and line height based on number of fields ---
 const fieldCount = fields.length;
+
+// ---------- PDF Generation (single‑page, no footer) ----------
+const doc = new PDFDocument({ size: "A4", margin: 50 });
+res.setHeader("Content-Type", "application/pdf");
+res.setHeader("Content-Disposition", `attachment; filename=reg-${regNo}.pdf`);
+doc.pipe(res);
+
+// Background image
+const bgPath = path.join(__dirname, "assets", "image.png");
+if (fs.existsSync(bgPath)) {
+  doc.image(bgPath, 0, 0, { width: doc.page.width, height: doc.page.height });
+} else {
+  doc.rect(0, 0, doc.page.width, doc.page.height).fill("#f8f9fa");
+}
+
+const pageWidth = doc.page.width;
+const centerX = pageWidth / 2;
+const pageHeight = doc.page.height;
+
+// --- Title size based on field count ---
+let titleSize = 28;
+let subTitleSize = 18;
+if (fieldCount > 10) {
+  titleSize = 24;
+  subTitleSize = 16;
+} else if (fieldCount > 6) {
+  titleSize = 26;
+  subTitleSize = 17;
+}
+
+doc.fontSize(titleSize)
+   .fillColor("#1a237e")
+   .font("Helvetica-Bold")
+   .text(quizName, centerX, 70, { align: "center" });
+
+doc.fontSize(subTitleSize)
+   .fillColor("#303f9f")
+   .font("Helvetica")
+   .text("Registration Confirmation", centerX, 110, { align: "center" });
+
+// --- Dynamic field sizing ---
 let fontSize, lineHeight, cardPadding;
 if (fieldCount <= 6) {
   fontSize = 13;
@@ -1167,76 +1172,69 @@ if (fieldCount <= 6) {
   cardPadding = 18;
 }
 
-// Calculate required height for the fields block
+// Calculate card height – we want to leave room for rules (at least 160px)
 const fieldBlockHeight = fieldCount * lineHeight;
-const cardY = 180;
+const cardY = 160; // start a bit lower
 const cardX = 80;
 const cardWidth = pageWidth - 160;
+const maxCardHeight = pageHeight - cardY - 180; // leave room for rules + separator
+let cardHeight = Math.min(Math.max(220, fieldBlockHeight + cardPadding * 2), maxCardHeight);
 
-// We want to leave room for the rules (at least ~200px) and a note line.
-// The page height is ~842 (A4). So max card height = 842 - cardY - 200 = ~462.
-const maxCardHeight = doc.page.height - cardY - 200;
-let cardHeight = Math.min(Math.max(280, fieldBlockHeight + cardPadding * 2), maxCardHeight);
-
-// If even with minimal font it still overflows, we reduce cardPadding and maybe shrink rules further.
-// But we'll keep it simple.
-
-// --- Draw the card background ---
+// --- Draw card background (fill only, no border) ---
 doc.fillColor("#ffffff")
    .fillOpacity(0.85)
    .rect(cardX, cardY, cardWidth, cardHeight)
    .fill()
-   .fillOpacity(1)
-   .strokeColor("#b0bec5")
-   .lineWidth(1)
-   .rect(cardX, cardY, cardWidth, cardHeight)
-   .stroke();
+   .fillOpacity(1);
 
-// --- Render fields inside the card ---
+// --- Render fields ---
 let yPos = cardY + cardPadding;
 const leftCol = cardX + 30;
 const rightCol = cardX + 200;
 
 doc.fontSize(fontSize);
 fields.forEach((field) => {
-  // Label
   doc.font("Helvetica-Bold").fillColor("#455a64");
   doc.text(field.label, leftCol, yPos);
-  // Value
   doc.font("Helvetica").fillColor("#1e293b");
   doc.text(field.value, rightCol, yPos);
   yPos += lineHeight;
 });
 
-// --- Separator line and rules ---
-const noteY = cardY + cardHeight + 20;
+// --- Separator line above rules ---
+const noteY = cardY + cardHeight + 15;
 doc.strokeColor("#b0bec5")
    .lineWidth(1)
-   .moveTo(80, noteY - 5)
-   .lineTo(pageWidth - 80, noteY - 5)
+   .moveTo(80, noteY)
+   .lineTo(pageWidth - 80, noteY)
    .stroke();
 
-const rulesY = noteY + 30;
-doc.fontSize(16)
+// --- Rules section – shrink to fit ---
+const rulesY = noteY + 25;
+doc.fontSize(14)
    .fillColor("#1a237e")
    .font("Helvetica-Bold")
-   .text("Important Rules", centerX, rulesY, { align: "center" })
-   .moveDown(0.5);
+   .text("Important Rules", centerX, rulesY, { align: "center" });
 
-const ruleFontSize = Math.max(10, 12 - Math.floor(fieldCount / 10)); // shrink if many fields
+// Calculate available space for rules
+const remainingHeight = pageHeight - (rulesY + 20) - 20; // 20 bottom margin
+const ruleCount = 8;
+// Estimate required height per rule: fontsize * 1.4
+let ruleFontSize = Math.min(11, Math.max(8, Math.floor(remainingHeight / (ruleCount * 1.6))));
+if (ruleFontSize < 8) ruleFontSize = 8; // never go below 8
+
 const ruleColor = "#37474f";
 const bulletX = 70;
-let rulesYPos = rulesY + 40;
-
+let rulesYPos = rulesY + 30;
 const rules = [
-  "Please login 5 minutes before the exam starts.",
-  "Do not press back or refresh the browser during the quiz.",
-  "The quiz will start exactly at the mentioned time.",
-  "You may navigate between questions freely.",
-  "Use the 'Clear Answer' button to deselect your choice.",
-  "Submit the quiz manually before the timer ends.",
-  "Failure to submit will result in disqualification.",
-  "Any malpractice leads to immediate disqualification."
+  "Login 5 mins before start.",
+  "Do not refresh or go back.",
+  "Quiz starts at scheduled time.",
+  "Navigate between questions freely.",
+  "Use 'Clear Answer' to deselect.",
+  "Submit manually before timer ends.",
+  "Failure to submit = disqualification.",
+  "Malpractice = immediate disqualification."
 ];
 
 doc.fontSize(ruleFontSize)
@@ -1245,15 +1243,10 @@ doc.fontSize(ruleFontSize)
 
 rules.forEach((rule) => {
   doc.text(`• ${rule}`, bulletX, rulesYPos, { width: pageWidth - 140 });
-  rulesYPos += ruleFontSize * 1.6;
+  rulesYPos += ruleFontSize * 1.5;
 });
 
-// --- Footer ---
-const footerY = doc.page.height - 40;
-doc.fontSize(10)
-   .fillColor("#78909c")
-   .text("Generated by Trivia Quiz System", centerX, footerY, { align: "center" });
-
+// --- Footer REMOVED entirely ---
 doc.end();
 
   } catch (err) {
