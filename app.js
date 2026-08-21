@@ -1088,7 +1088,7 @@ app.get("/registration-config", async (req, res) => {
 
     await rebuildRegistrationCsv(quizName);
 
-       // ---------- PDF GENERATION (single‑page, no footer, title right, rules left) ----------
+    // ---------- PDF GENERATION (single‑page, no footer, title right, rules left) ----------
 
 // Build fields array first
 const fields = [];
@@ -1129,9 +1129,10 @@ if (fs.existsSync(bgPath)) {
 const pageWidth = doc.page.width;
 const pageHeight = doc.page.height;
 const leftMargin = 80;
-const rightEdge = pageWidth - leftMargin;
+const rightMargin = leftMargin; // symmetrical
+const fullWidth = pageWidth - leftMargin - rightMargin;
 
-// --- Title – RIGHT ALIGNED ---
+// --- Title – RIGHT ALIGNED (use leftMargin as x, align: 'right') ---
 let titleSize = 28;
 let subTitleSize = 18;
 if (fieldCount > 10) {
@@ -1145,12 +1146,12 @@ if (fieldCount > 10) {
 doc.fontSize(titleSize)
    .fillColor("#1a237e")
    .font("Helvetica-Bold")
-   .text(quizName, rightEdge, 70, { align: "right" });
+   .text(quizName, leftMargin, 70, { width: fullWidth, align: "right" });
 
 doc.fontSize(subTitleSize)
    .fillColor("#303f9f")
    .font("Helvetica")
-   .text("Registration Confirmation", rightEdge, 110, { align: "right" });
+   .text("Registration Confirmation", leftMargin, 110, { width: fullWidth, align: "right" });
 
 // --- Dynamic field sizing ---
 let fontSize, lineHeight, cardPadding;
@@ -1176,7 +1177,7 @@ if (fieldCount <= 6) {
 const fieldBlockHeight = fieldCount * lineHeight;
 const cardY = 160;
 const cardX = leftMargin;
-const cardWidth = pageWidth - (leftMargin * 2);
+const cardWidth = fullWidth;
 const maxCardHeight = pageHeight - cardY - 180;
 let cardHeight = Math.min(Math.max(220, fieldBlockHeight + cardPadding * 2), maxCardHeight);
 
@@ -1201,12 +1202,12 @@ fields.forEach((field) => {
   yPos += lineHeight;
 });
 
-// --- Separator line (full width, left‑aligned) ---
+// --- Separator line (full width) ---
 const noteY = cardY + cardHeight + 15;
 doc.strokeColor("#b0bec5")
    .lineWidth(1)
    .moveTo(leftMargin, noteY)
-   .lineTo(pageWidth - leftMargin, noteY)
+   .lineTo(pageWidth - rightMargin, noteY)
    .stroke();
 
 // --- Rules section – LEFT ALIGNED ---
@@ -1214,7 +1215,7 @@ const rulesY = noteY + 25;
 doc.fontSize(14)
    .fillColor("#1a237e")
    .font("Helvetica-Bold")
-   .text("Important Rules", leftMargin, rulesY, { align: "left" });
+   .text("Important Rules", leftMargin, rulesY, { width: fullWidth, align: "left" });
 
 // Calculate available space for rules
 const remainingHeight = pageHeight - (rulesY + 20) - 20;
@@ -1242,7 +1243,7 @@ doc.fontSize(ruleFontSize)
    .font("Helvetica");
 
 rules.forEach((rule) => {
-  doc.text(`• ${rule}`, bulletX, rulesYPos, { width: pageWidth - (leftMargin * 2) });
+  doc.text(`• ${rule}`, bulletX, rulesYPos, { width: fullWidth });
   rulesYPos += ruleFontSize * 1.5;
 });
 
