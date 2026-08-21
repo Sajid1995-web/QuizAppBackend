@@ -1113,7 +1113,31 @@ fields.push({ label: "Password:", value: email });
 
 const fieldCount = fields.length;
 
-// ---------- PDF Generation (single‑page, no footer) ----------
+// ---------- PDF GENERATION (single‑page, no footer, left‑aligned rules) ----------
+
+// Build fields array first
+const fields = [];
+fields.push({ label: "Registration No:", value: regNo });
+fields.push({ label: "Name:", value: name });
+fields.push({ label: "Email:", value: email });
+
+for (const [fieldName, settings] of Object.entries(extraFields)) {
+  if (!settings.enabled) continue;
+  const value = customData.get(fieldName) || "";
+  if (value) {
+    const label = fieldName.charAt(0).toUpperCase() + fieldName.slice(1) + ":";
+    fields.push({ label, value });
+  }
+}
+
+const startIST = config.startTime.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+fields.push({ label: "Quiz Date & Time (IST):", value: startIST });
+fields.push({ label: "Login ID:", value: regNo });
+fields.push({ label: "Password:", value: email });
+
+const fieldCount = fields.length;
+
+// Create PDF
 const doc = new PDFDocument({ size: "A4", margin: 50 });
 res.setHeader("Content-Type", "application/pdf");
 res.setHeader("Content-Disposition", `attachment; filename=reg-${regNo}.pdf`);
@@ -1128,10 +1152,10 @@ if (fs.existsSync(bgPath)) {
 }
 
 const pageWidth = doc.page.width;
-const centerX = pageWidth / 2;
 const pageHeight = doc.page.height;
+const leftMargin = 80; // consistent left margin for text blocks
 
-// --- Title size based on field count ---
+// --- Title ---
 let titleSize = 28;
 let subTitleSize = 18;
 if (fieldCount > 10) {
@@ -1145,12 +1169,12 @@ if (fieldCount > 10) {
 doc.fontSize(titleSize)
    .fillColor("#1a237e")
    .font("Helvetica-Bold")
-   .text(quizName, centerX, 70, { align: "center" });
+   .text(quizName, leftMargin, 70, { align: "left" }); // left aligned
 
 doc.fontSize(subTitleSize)
    .fillColor("#303f9f")
    .font("Helvetica")
-   .text("Registration Confirmation", centerX, 110, { align: "center" });
+   .text("Registration Confirmation", leftMargin, 110, { align: "left" });
 
 // --- Dynamic field sizing ---
 let fontSize, lineHeight, cardPadding;
@@ -1172,60 +1196,60 @@ if (fieldCount <= 6) {
   cardPadding = 18;
 }
 
-// Calculate card height – we want to leave room for rules (at least 160px)
+// Card dimensions
 const fieldBlockHeight = fieldCount * lineHeight;
-const cardY = 160; // start a bit lower
-const cardX = 80;
-const cardWidth = pageWidth - 160;
-const maxCardHeight = pageHeight - cardY - 180; // leave room for rules + separator
+const cardY = 160;
+const cardX = leftMargin;
+const cardWidth = pageWidth - (leftMargin * 2);
+const maxCardHeight = pageHeight - cardY - 180;
 let cardHeight = Math.min(Math.max(220, fieldBlockHeight + cardPadding * 2), maxCardHeight);
 
-// --- Draw card background (fill only, no border) ---
+// --- Card background (fill only, no border) ---
 doc.fillColor("#ffffff")
    .fillOpacity(0.85)
    .rect(cardX, cardY, cardWidth, cardHeight)
    .fill()
    .fillOpacity(1);
 
-// --- Render fields ---
+// --- Render fields inside card ---
 let yPos = cardY + cardPadding;
-const leftCol = cardX + 30;
-const rightCol = cardX + 200;
+const labelX = cardX + 30;
+const valueX = cardX + 180;
 
 doc.fontSize(fontSize);
 fields.forEach((field) => {
   doc.font("Helvetica-Bold").fillColor("#455a64");
-  doc.text(field.label, leftCol, yPos);
+  doc.text(field.label, labelX, yPos);
   doc.font("Helvetica").fillColor("#1e293b");
-  doc.text(field.value, rightCol, yPos);
+  doc.text(field.value, valueX, yPos);
   yPos += lineHeight;
 });
 
-// --- Separator line above rules ---
+// --- Separator line above rules (left aligned) ---
 const noteY = cardY + cardHeight + 15;
 doc.strokeColor("#b0bec5")
    .lineWidth(1)
-   .moveTo(80, noteY)
-   .lineTo(pageWidth - 80, noteY)
+   .moveTo(leftMargin, noteY)
+   .lineTo(pageWidth - leftMargin, noteY)
    .stroke();
 
-// --- Rules section – shrink to fit ---
+// --- Rules section – LEFT ALIGNED ---
 const rulesY = noteY + 25;
 doc.fontSize(14)
    .fillColor("#1a237e")
    .font("Helvetica-Bold")
-   .text("Important Rules", centerX, rulesY, { align: "left" });
+   .text("Important Rules", leftMargin, rulesY, { align: "left" });
 
 // Calculate available space for rules
-const remainingHeight = pageHeight - (rulesY + 20) - 20; // 20 bottom margin
+const remainingHeight = pageHeight - (rulesY + 20) - 20;
 const ruleCount = 8;
-// Estimate required height per rule: fontsize * 1.4
 let ruleFontSize = Math.min(11, Math.max(8, Math.floor(remainingHeight / (ruleCount * 1.6))));
-if (ruleFontSize < 8) ruleFontSize = 8; // never go below 8
+if (ruleFontSize < 8) ruleFontSize = 8;
 
 const ruleColor = "#37474f";
-const bulletX = 70;
-let rulesYPos = rulesY + 30;
+const bulletX = leftMargin; // align bullets with the title
+let rulesYPos = rulesY + 28;
+
 const rules = [
   "Login 5 mins before start.",
   "Do not refresh or go back.",
@@ -1242,11 +1266,11 @@ doc.fontSize(ruleFontSize)
    .font("Helvetica");
 
 rules.forEach((rule) => {
-  doc.text(`• ${rule}`, bulletX, rulesYPos, { width: pageWidth - 140 });
+  doc.text(`• ${rule}`, bulletX, rulesYPos, { width: pageWidth - (leftMargin * 2) });
   rulesYPos += ruleFontSize * 1.5;
 });
 
-// --- Footer REMOVED entirely ---
+// --- Footer REMOVED ---
 doc.end();
 
   } catch (err) {
