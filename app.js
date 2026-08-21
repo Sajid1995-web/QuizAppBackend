@@ -1214,7 +1214,7 @@ const rulesY = noteY + 25;
 doc.fontSize(14)
    .fillColor("#1a237e")
    .font("Helvetica-Bold")
-   .text("Important Rules", centerX, rulesY, { align: "center" });
+   .text("Important Rules", centerX, rulesY, { align: "left" });
 
 // Calculate available space for rules
 const remainingHeight = pageHeight - (rulesY + 20) - 20; // 20 bottom margin
